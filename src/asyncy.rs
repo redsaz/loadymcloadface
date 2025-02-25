@@ -1,20 +1,20 @@
 use async_channel::{bounded, Receiver, Sender};
 use futures::{stream, StreamExt};
 use rand::{self, Rng};
-use reqwest::Client;
-use std::sync::atomic::{AtomicI32, Ordering};
-use std::sync::Arc;
+// use reqwest::Client;
+// use std::sync::atomic::{AtomicI32, Ordering};
+// use std::sync::Arc;
 use std::time::Duration;
 use tokio;
 
 const CONCURRENT_REQUESTS: usize = 1000;
 
-async fn sendie(series_id: usize, s: Sender<u64>) -> usize {
+async fn sendie(_series_id: usize, _s: Sender<u64>) -> usize {
     let start = std::time::Instant::now();
     let target_duration = std::time::Duration::from_secs(10);
 
     let bodies = stream::iter(0..CONCURRENT_REQUESTS)
-        .map(|user_id| {
+        .map(|_user_id| {
             // let user_id = user_ids.fetch_add(1, Ordering::SeqCst);
             // let client = &client;
             async move {
@@ -46,16 +46,16 @@ async fn sendie(series_id: usize, s: Sender<u64>) -> usize {
     //     .await;
 }
 
-async fn recvie(series_id: usize, r: Receiver<u64>) -> usize {
+async fn recvie(_series_id: usize, _r: Receiver<u64>) -> usize {
     let start = std::time::Instant::now();
     let target_duration = std::time::Duration::from_secs(10);
-    let client = Client::new();
+    // let client = Client::new();
 
-    let urls = vec!["http://localhost:8080"; CONCURRENT_REQUESTS];
-    let user_ids = Arc::new(AtomicI32::new(0));
+    // let urls = vec!["http://localhost:8080"; CONCURRENT_REQUESTS];
+    // let user_ids = Arc::new(AtomicI32::new(0));
 
     let bodies = stream::iter(0..CONCURRENT_REQUESTS)
-        .map(|user_id| {
+        .map(|_user_id| {
             // let user_id = user_ids.fetch_add(1, Ordering::SeqCst);
             // let client = &client;
             async move {
