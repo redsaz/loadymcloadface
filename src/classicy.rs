@@ -1,10 +1,10 @@
 use chrono::{DateTime, Utc};
 use crossbeam::channel::{bounded, Receiver, Sender};
 use reqwest::blocking::Client;
-use reqwest::StatusCode;
+use reqwest::{Method, StatusCode};
 use std::fmt;
 use std::fs::File;
-use std::io::{BufWriter, Write};
+use std::io::{read_to_string, BufReader, BufWriter, Write};
 use std::thread::{scope, sleep};
 use std::time::{Duration, Instant};
 
@@ -16,7 +16,7 @@ struct CallResult {
 // useful jmeter values:
 // "timeStamp","elapsed","label","responseCode","threadName","success","bytes","allThreads"
 #[derive(Debug)]
-struct LogEntry {
+struct Sample {
     timestamp: DateTime<Utc>,
     elapsed: Duration,
     success: bool,
@@ -28,7 +28,7 @@ struct LogEntry {
     threads: usize,
 }
 
-impl fmt::Display for LogEntry {
+impl fmt::Display for Sample {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(
             f,
@@ -46,8 +46,9 @@ impl fmt::Display for LogEntry {
     }
 }
 
-fn hit_target(client: &Client) -> Result<CallResult, reqwest::Error> {
-    let req = client.get("http://127.0.0.1:8080/logs").send()?;
+fn hit_target(client: &Client, url: &str, method: Method) -> Result<CallResult, reqwest::Error> {
+    // "http://127.0.0.1:8080/logs"
+    let req = client.request(method, url).send()?;
     let status = req.status();
     let len = req.text()?.len();
 
@@ -58,11 +59,12 @@ fn hit_target(client: &Client) -> Result<CallResult, reqwest::Error> {
 }
 
 fn traffic_user(
+    urls: &Vec<String>,
     thread: usize,
     threads: usize,
-    rx: Receiver<u32>,
+    rx: Receiver<i64>,
     client: Client,
-    result_tx: Sender<LogEntry>,
+    result_tx: Sender<Sample>,
 ) -> usize {
     let mut count = 0;
     let mut succeess_count = 0;
@@ -70,10 +72,11 @@ fn traffic_user(
     let mut total_duration = Duration::ZERO;
     let mut conn_error_count = 0;
     let mut conn_error_duration = Duration::ZERO;
+    let method = Method::GET;
 
     loop {
         let item = rx.recv().unwrap_or(0);
-        if item == 0 {
+        if item == -1 {
             // Got the signal to quit
             // (Ideally, this'd be a watch or broadcaster and we'd select
             // between that receiver and the "main" receiver, but this'll do)
@@ -81,7 +84,8 @@ fn traffic_user(
         }
         let timestamp = Utc::now();
         let start = Instant::now();
-        let entry = match hit_target(&client) {
+        let url = urls[item as usize % urls.len()].as_str();
+        let entry = match hit_target(&client, url, method.clone()) {
             Result::Ok(v) => {
                 let elapsed = start.elapsed();
                 total_duration += elapsed;
@@ -91,14 +95,14 @@ fn traffic_user(
                     succeess_count += 1;
                 }
 
-                LogEntry {
+                Sample {
                     timestamp,
                     elapsed,
                     success: v.status.is_success(),
                     response_code: v.status.as_str().to_string(),
                     bytes: v.bytes_received as u64,
-                    method: "GET".to_string(),
-                    url: "hmm".to_string(),
+                    method: method.to_string(),
+                    url: url.to_string(),
                     thread,
                     threads,
                 }
@@ -108,14 +112,14 @@ fn traffic_user(
                 conn_error_duration += start.elapsed();
                 let elapsed = start.elapsed();
 
-                LogEntry {
+                Sample {
                     timestamp,
                     elapsed,
                     success: false,
                     response_code: "conn_error".to_string(),
                     bytes: 0,
-                    method: "GET".to_string(),
-                    url: "hmm".to_string(),
+                    method: method.to_string(),
+                    url: url.to_string(),
                     thread,
                     threads,
                 }
@@ -145,7 +149,7 @@ fn traffic_user(
     count
 }
 
-fn logger(rx: Receiver<LogEntry>) {
+fn logger(rx: Receiver<Sample>) {
     let mut log = BufWriter::new(File::create("results.log").unwrap());
     let mut count = 0;
     loop {
@@ -160,13 +164,13 @@ fn logger(rx: Receiver<LogEntry>) {
         writeln!(log, "{}", entry).unwrap();
     }
     log.flush().unwrap();
-    eprintln!("Logging is done. Received {} entries.", count);
+    eprintln!("Logging complete. Received {} entries.", count);
 }
 
 pub fn run_traffic() {
     // TODO: A better way to do an end-of-message signal is a completely different channel,
     // or use an enum.
-    let stop_logging = LogEntry {
+    let stop_logging = Sample {
         timestamp: DateTime::from_timestamp_nanos(12344321),
         elapsed: Duration::MAX,
         success: true,
@@ -186,6 +190,11 @@ pub fn run_traffic() {
     } else {
         Duration::ZERO
     };
+    let urls: Vec<String> = read_to_string(BufReader::new(File::open("urls.txt").unwrap()))
+        .unwrap()
+        .lines()
+        .map(String::from)
+        .collect();
     eprintln!("Using {} threads.", num_threads);
 
     scope(|scope| {
@@ -200,8 +209,10 @@ pub fn run_traffic() {
             let thread_rx = rx.clone();
             let thread_client = client.clone();
             let thread_result_tx = result_tx.clone();
+            let thread_urls = &urls;
             let handle = scope.spawn(move || {
                 traffic_user(
+                    thread_urls,
                     thread,
                     num_threads,
                     thread_rx,
@@ -214,12 +225,12 @@ pub fn run_traffic() {
         // Spin up logger outputter
         let logger_thread = scope.spawn(|| logger(result_rx));
         // Send traffic
-        let mut i: u32 = 0; // Must be u32 for delay calc (for now), so has 4b call limit
+        let mut i: i64 = 0; // Must be u32 for delay calc (for now), so has 4b call limit
         let start = Instant::now();
         let deadline = start + run_length;
         while start.elapsed() < run_length {
             i += 1;
-            let delay = (call_delay * i)
+            let delay = (call_delay * i as u32)
                 .checked_sub(start.elapsed())
                 .unwrap_or(Duration::ZERO);
             if delay > Duration::ZERO {
@@ -231,7 +242,7 @@ pub fn run_traffic() {
         for _ in 0..num_threads {
             // TODO: Make the shutdown signal in a different channel, because when it is in
             // the same channel, it is possible for the requests to get "backed up".
-            tx.send(0).unwrap();
+            tx.send(-1).unwrap();
         }
         // Collect stats
         let total = threads
