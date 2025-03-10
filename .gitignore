@@ -22,3 +22,8 @@ Cargo.lock
 
 # Ignore vim interrupted edit files
 *.swp
+
+# Ignore files used by app
+.env
+urls.txt
+results.log

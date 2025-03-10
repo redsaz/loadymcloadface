@@ -1,3 +1,4 @@
+use crate::configuration::Configuration;
 use chrono::{DateTime, Utc};
 use crossbeam::channel::{bounded, Receiver, Sender};
 use reqwest::blocking::Client;
@@ -167,7 +168,7 @@ fn logger(rx: Receiver<Sample>) {
     eprintln!("Logging complete. Received {} entries.", count);
 }
 
-pub fn run_traffic() {
+pub fn run_traffic(config: Configuration) {
     // TODO: A better way to do an end-of-message signal is a completely different channel,
     // or use an enum.
     let stop_logging = Sample {
@@ -183,13 +184,16 @@ pub fn run_traffic() {
     };
 
     let num_threads = std::thread::available_parallelism().map_or(1, |t| t.get());
-    let run_length = Duration::from_secs(10);
-    let calls_per_minute = 18000_f64;
-    let call_delay = if calls_per_minute != 0_f64 {
-        Duration::from_secs_f64(60_f64 / calls_per_minute)
+    let run_length = config.time;
+    let calls_per_sec = config.rate;
+    let call_delay = if calls_per_sec != 0_f64 {
+        Duration::from_secs_f64(1_f64 / calls_per_sec)
     } else {
         Duration::ZERO
     };
+    if config.debug {
+        eprintln!("Call delay is {}ms", call_delay.as_millis());
+    }
     let urls: Vec<String> = read_to_string(BufReader::new(File::open("urls.txt").unwrap()))
         .unwrap()
         .lines()
