@@ -1,4 +1,6 @@
-use loadymcloadface::configuration;
+use std::path::Path;
+
+use loadymcloadface::{configuration, siegeurls};
 // use tokio;
 //
 // #[tokio::main(flavor = "multi_thread", worker_threads = 4)]
@@ -8,5 +10,7 @@ use loadymcloadface::configuration;
 
 fn main() {
     let config = configuration::config().expect("LoadyMcLoadface is misconfigured.");
-    loadymcloadface::classicy::run_traffic(config);
+    let urls = siegeurls::load(Path::new("urls.txt"));
+    eprintln!("urls: {:?}", urls);
+    loadymcloadface::classicy::run_traffic(config, &urls);
 }

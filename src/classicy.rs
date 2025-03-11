@@ -1,11 +1,13 @@
 use crate::configuration::Configuration;
+use crate::siegeurls::{load, UrlEntry};
 use chrono::{DateTime, Utc};
 use crossbeam::channel::{bounded, Receiver, Sender};
 use reqwest::blocking::Client;
-use reqwest::{Method, StatusCode};
+use reqwest::{Method, StatusCode, Url};
 use std::fmt;
 use std::fs::File;
-use std::io::{read_to_string, BufReader, BufWriter, Write};
+use std::io::{BufReader, BufWriter, Write};
+use std::path::Path;
 use std::thread::{scope, sleep};
 use std::time::{Duration, Instant};
 
@@ -60,7 +62,8 @@ fn hit_target(client: &Client, url: &str, method: Method) -> Result<CallResult, 
 }
 
 fn traffic_user(
-    urls: &Vec<String>,
+    baseurl: Url,
+    urls: &Vec<UrlEntry>,
     thread: usize,
     threads: usize,
     rx: Receiver<i64>,
@@ -73,7 +76,6 @@ fn traffic_user(
     let mut total_duration = Duration::ZERO;
     let mut conn_error_count = 0;
     let mut conn_error_duration = Duration::ZERO;
-    let method = Method::GET;
 
     loop {
         let item = rx.recv().unwrap_or(0);
@@ -85,8 +87,9 @@ fn traffic_user(
         }
         let timestamp = Utc::now();
         let start = Instant::now();
-        let url = urls[item as usize % urls.len()].as_str();
-        let entry = match hit_target(&client, url, method.clone()) {
+        let url_entry = urls[item as usize % urls.len()].clone();
+        let url = &baseurl.join(&url_entry.urlpart.clone()).unwrap();
+        let entry = match hit_target(&client, url.as_str(), url_entry.method.clone()) {
             Result::Ok(v) => {
                 let elapsed = start.elapsed();
                 total_duration += elapsed;
@@ -102,8 +105,8 @@ fn traffic_user(
                     success: v.status.is_success(),
                     response_code: v.status.as_str().to_string(),
                     bytes: v.bytes_received as u64,
-                    method: method.to_string(),
-                    url: url.to_string(),
+                    method: url_entry.method.to_string(),
+                    url: url_entry.urlpart.to_string(),
                     thread,
                     threads,
                 }
@@ -119,8 +122,8 @@ fn traffic_user(
                     success: false,
                     response_code: "conn_error".to_string(),
                     bytes: 0,
-                    method: method.to_string(),
-                    url: url.to_string(),
+                    method: url_entry.method.to_string(),
+                    url: url_entry.urlpart.to_string(),
                     thread,
                     threads,
                 }
@@ -168,7 +171,7 @@ fn logger(rx: Receiver<Sample>) {
     eprintln!("Logging complete. Received {} entries.", count);
 }
 
-pub fn run_traffic(config: Configuration) {
+pub fn run_traffic(config: Configuration, urls: &Vec<UrlEntry>) {
     // TODO: A better way to do an end-of-message signal is a completely different channel,
     // or use an enum.
     let stop_logging = Sample {
@@ -194,17 +197,20 @@ pub fn run_traffic(config: Configuration) {
     if config.debug {
         eprintln!("Call delay is {}ms", call_delay.as_millis());
     }
-    let urls: Vec<String> = read_to_string(BufReader::new(File::open("urls.txt").unwrap()))
-        .unwrap()
-        .lines()
-        .map(String::from)
-        .collect();
     eprintln!("Using {} threads.", num_threads);
 
     scope(|scope| {
         let (tx, rx) = bounded(1); // TODO: Make this big again when the main stream isn't used for shutdown as well.
         let (result_tx, result_rx) = bounded(1000);
-        let client = Client::builder().build().unwrap();
+
+        let mut builder = Client::builder();
+        if config.timeout.is_some() {
+            builder = builder.timeout(config.timeout);
+        }
+        if config.identity_pem.is_some() {
+            builder = builder.identity(config.identity_pem.unwrap());
+        }
+        let client = builder.build().unwrap();
 
         let mut threads = Vec::with_capacity(num_threads);
 
@@ -213,9 +219,11 @@ pub fn run_traffic(config: Configuration) {
             let thread_rx = rx.clone();
             let thread_client = client.clone();
             let thread_result_tx = result_tx.clone();
+            let thread_baseurl = config.baseurl.clone();
             let thread_urls = &urls;
             let handle = scope.spawn(move || {
                 traffic_user(
+                    thread_baseurl,
                     thread_urls,
                     thread,
                     num_threads,

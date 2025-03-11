@@ -1,8 +1,9 @@
 use config::{Config, ConfigError, Environment, File};
 use core::result::Result;
 use dotenv::dotenv;
+use reqwest::{Identity, Url};
 use std::env;
-use std::path::PathBuf;
+use std::io::Read;
 use std::time::Duration;
 
 /// Configuration for running a load test.
@@ -11,7 +12,7 @@ pub struct Configuration {
     /// If true then print debug info
     pub debug: bool,
     /// The urls file may be a list of paths, which are tacked on to the end of this base URL.
-    pub baseurl: String,
+    pub baseurl: Url,
     /// The maximum number of threads (simultaneous users) that will run. If 0, native number of
     /// cores is used.
     pub threads: usize,
@@ -26,10 +27,10 @@ pub struct Configuration {
     pub time: Duration,
     /// How long to wait for the entirety of connecting, writing, and reading before closing,
     /// in seconds. By default the timeout is 30 seconds. If 0, there is no timeout.
-    pub timeout: u64,
+    pub timeout: Option<Duration>,
     /// Pass a client cert for each request for mTLS, if defined with the path to a pem file that
     /// contains both the cert and key. By default this is undefined.
-    pub identity_pem: Option<PathBuf>,
+    pub identity_pem: Option<Identity>,
 }
 
 fn rate_from_string(rate_str: &str) -> Result<f64, ConfigError> {
@@ -72,6 +73,18 @@ fn time_from_string(time_str: &str) -> Result<Duration, ConfigError> {
             "Unknown unit specified for duration.".to_string(),
         )),
     }
+}
+
+fn identity_from_string(pem_file_str: Option<&str>) -> Option<Identity> {
+    if pem_file_str.is_none() {
+        return Option::None;
+    }
+    let mut buf = Vec::new();
+    std::fs::File::open(pem_file_str.unwrap())
+        .unwrap()
+        .read_to_end(&mut buf)
+        .unwrap();
+    Some(reqwest::Identity::from_pem(&buf).unwrap())
 }
 
 /// Configuration for this app.
@@ -119,11 +132,11 @@ pub fn config() -> Result<Configuration, ConfigError> {
 
     Ok(Configuration {
         debug: s.get("debug").unwrap(),
-        baseurl: s.get("baseurl").unwrap(),
+        baseurl: Url::parse(s.get_string("baseurl").unwrap().as_str()).unwrap(),
         threads: s.get("threads").unwrap(),
         rate: rate_from_string(&s.get_string("rate").unwrap()).unwrap(),
         time: time_from_string(&s.get_string("time").unwrap()).unwrap(),
-        timeout: s.get("timeout").unwrap(),
-        identity_pem: s.get("identity_pem").unwrap(),
+        timeout: Option::Some(Duration::from_secs(s.get("timeout").unwrap())),
+        identity_pem: identity_from_string(s.get("identity_pem").unwrap()),
     })
 }
