@@ -1,18 +1,46 @@
 use core::panic;
 use std::{
     fs::File,
-    io::{BufRead, BufReader},
+    io::{BufRead, BufReader, Lines},
+    iter::Iterator,
     path::Path,
 };
 
+use rand::seq::IteratorRandom;
 use reqwest::Method;
 
-/// An entry in a URLs text file.
+/// The method and URL to make a call with.
 #[derive(Debug, Clone)]
 pub struct UrlEntry {
     /// A URL part can either be a complete URL or just the end portion of a URL.
     pub urlpart: String,
     pub method: Method,
+}
+
+/// Allows fetching a stream of UrlEntry items.
+#[derive(Debug)]
+pub struct SiegeUrls {
+    // Something something something
+    lines: Lines<BufReader<File>>,
+}
+
+impl Iterator for SiegeUrls {
+    type Item = UrlEntry;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            let line = self.lines.next();
+            if let Some(l) = line {
+                let line = l.unwrap();
+                let entry = parse_line(line.as_str());
+                if entry.is_some() {
+                    return entry;
+                }
+            } else {
+                return None;
+            }
+        }
+    }
 }
 
 struct Tokenizer<'a> {
@@ -180,4 +208,10 @@ pub fn load(urls_txt: &Path) -> Vec<UrlEntry> {
         }
     }
     entries
+}
+
+pub fn load_iter(urls_txt: &Path) -> SiegeUrls {
+    SiegeUrls {
+        lines: BufReader::new(File::open(urls_txt).unwrap()).lines(),
+    }
 }

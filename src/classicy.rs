@@ -1,13 +1,12 @@
 use crate::configuration::Configuration;
-use crate::siegeurls::{load, UrlEntry};
+use crate::siegeurls::{SiegeUrls, UrlEntry};
 use chrono::{DateTime, Utc};
 use crossbeam::channel::{bounded, Receiver, Sender};
 use reqwest::blocking::Client;
 use reqwest::{Method, StatusCode, Url};
 use std::fmt;
 use std::fs::File;
-use std::io::{BufReader, BufWriter, Write};
-use std::path::Path;
+use std::io::{BufWriter, Write};
 use std::thread::{scope, sleep};
 use std::time::{Duration, Instant};
 
@@ -63,10 +62,9 @@ fn hit_target(client: &Client, url: &str, method: Method) -> Result<CallResult, 
 
 fn traffic_user(
     baseurl: Url,
-    urls: &Vec<UrlEntry>,
     thread: usize,
     threads: usize,
-    rx: Receiver<i64>,
+    rx: Receiver<Option<UrlEntry>>,
     client: Client,
     result_tx: Sender<Sample>,
 ) -> usize {
@@ -78,16 +76,16 @@ fn traffic_user(
     let mut conn_error_duration = Duration::ZERO;
 
     loop {
-        let item = rx.recv().unwrap_or(0);
-        if item == -1 {
+        let url_entry = rx.recv().unwrap();
+        if url_entry.is_none() {
             // Got the signal to quit
             // (Ideally, this'd be a watch or broadcaster and we'd select
             // between that receiver and the "main" receiver, but this'll do)
             break;
         }
+        let url_entry = url_entry.unwrap();
         let timestamp = Utc::now();
         let start = Instant::now();
-        let url_entry = urls[item as usize % urls.len()].clone();
         let url = &baseurl.join(&url_entry.urlpart.clone()).unwrap();
         let entry = match hit_target(&client, url.as_str(), url_entry.method.clone()) {
             Result::Ok(v) => {
@@ -171,7 +169,7 @@ fn logger(rx: Receiver<Sample>) {
     eprintln!("Logging complete. Received {} entries.", count);
 }
 
-pub fn run_traffic(config: Configuration, urls: &Vec<UrlEntry>) {
+pub fn run_traffic(config: Configuration, urls: &mut SiegeUrls) {
     // TODO: A better way to do an end-of-message signal is a completely different channel,
     // or use an enum.
     let stop_logging = Sample {
@@ -220,11 +218,9 @@ pub fn run_traffic(config: Configuration, urls: &Vec<UrlEntry>) {
             let thread_client = client.clone();
             let thread_result_tx = result_tx.clone();
             let thread_baseurl = config.baseurl.clone();
-            let thread_urls = &urls;
             let handle = scope.spawn(move || {
                 traffic_user(
                     thread_baseurl,
-                    thread_urls,
                     thread,
                     num_threads,
                     thread_rx,
@@ -248,13 +244,20 @@ pub fn run_traffic(config: Configuration, urls: &Vec<UrlEntry>) {
             if delay > Duration::ZERO {
                 sleep(delay);
             }
-            tx.send_deadline(i, deadline).unwrap_or_default();
+            let url_entry = urls.next();
+            if url_entry.is_some() {
+                tx.send_deadline(url_entry, deadline).unwrap_or_default();
+            } else {
+                // TODO: start again until time is done.
+                eprintln!("Reached the end of the urls list before the time limit was reached.");
+                break;
+            }
         }
         // Signal to all traffic generator threads to shutdown
         for _ in 0..num_threads {
             // TODO: Make the shutdown signal in a different channel, because when it is in
             // the same channel, it is possible for the requests to get "backed up".
-            tx.send(-1).unwrap();
+            tx.send(None).unwrap();
         }
         // Collect stats
         let total = threads

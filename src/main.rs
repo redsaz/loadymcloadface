@@ -10,7 +10,7 @@ use loadymcloadface::{configuration, siegeurls};
 
 fn main() {
     let config = configuration::config().expect("LoadyMcLoadface is misconfigured.");
-    let urls = siegeurls::load(Path::new("urls.txt"));
+    let mut urls = siegeurls::load_iter(Path::new("urls.txt"));
     eprintln!("urls: {:?}", urls);
-    loadymcloadface::classicy::run_traffic(config, &urls);
+    loadymcloadface::classicy::run_traffic(config, &mut urls);
 }
