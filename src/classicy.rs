@@ -7,6 +7,7 @@ use reqwest::{Method, StatusCode, Url};
 use std::fmt;
 use std::fs::File;
 use std::io::{BufWriter, Write};
+use std::ops::AddAssign;
 use std::thread::{scope, sleep};
 use std::time::{Duration, Instant};
 
@@ -186,15 +187,7 @@ pub fn run_traffic(config: Configuration, urls: &mut SiegeUrls) {
 
     let num_threads = std::thread::available_parallelism().map_or(1, |t| t.get());
     let run_length = config.time;
-    let calls_per_sec = config.rate;
-    let call_delay = if calls_per_sec != 0_f64 {
-        Duration::from_secs_f64(1_f64 / calls_per_sec)
-    } else {
-        Duration::ZERO
-    };
-    if config.debug {
-        eprintln!("Call delay is {}ms", call_delay.as_millis());
-    }
+
     eprintln!("Using {} threads.", num_threads);
 
     scope(|scope| {
@@ -233,25 +226,35 @@ pub fn run_traffic(config: Configuration, urls: &mut SiegeUrls) {
         // Spin up logger outputter
         let logger_thread = scope.spawn(|| logger(result_rx));
         // Send traffic
-        let mut i: i64 = 0; // Must be u32 for delay calc (for now), so has 4b call limit
+        let mut i: i64 = 0;
         let start = Instant::now();
+        let mut delay_total: Duration = Duration::ZERO;
         let deadline = start + run_length;
         while start.elapsed() < run_length {
             i += 1;
-            let delay = (call_delay * i as u32)
+            let url_entry = urls.next();
+            if url_entry.is_none() {
+                // TODO: start again until time is done.
+                eprintln!("Reached the end of the urls list before the time limit was reached.");
+                break;
+            }
+
+            // I'm sure time will show that this is not ideal: delay is calculated by summing up
+            // the total expected delay thus far, find the difference compared to the elapsed
+            // time, and if greater than 0, sleep.
+            // The expected problem is that if a network hiccup occurs, it *could* cause a ton of
+            // calls to "bunch up" after the hiccup completes, sending a swarm ASAP until delay
+            // catches up again.
+            let call_delay = url_entry.as_ref().unwrap().delay;
+            delay_total += call_delay.clone();
+            let delay = delay_total
                 .checked_sub(start.elapsed())
                 .unwrap_or(Duration::ZERO);
             if delay > Duration::ZERO {
                 sleep(delay);
             }
-            let url_entry = urls.next();
-            if url_entry.is_some() {
-                tx.send_deadline(url_entry, deadline).unwrap_or_default();
-            } else {
-                // TODO: start again until time is done.
-                eprintln!("Reached the end of the urls list before the time limit was reached.");
-                break;
-            }
+
+            tx.send_deadline(url_entry, deadline).unwrap_or_default();
         }
         // Signal to all traffic generator threads to shutdown
         for _ in 0..num_threads {

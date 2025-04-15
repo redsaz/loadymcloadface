@@ -1,17 +1,17 @@
 use core::panic;
+use reqwest::Method;
 use std::{
     fs::File,
     io::{BufRead, BufReader, Lines},
     iter::Iterator,
     path::Path,
+    time::Duration,
 };
-
-use rand::seq::IteratorRandom;
-use reqwest::Method;
 
 /// The method and URL to make a call with.
 #[derive(Debug, Clone)]
 pub struct UrlEntry {
+    pub delay: Duration,
     /// A URL part can either be a complete URL or just the end portion of a URL.
     pub urlpart: String,
     pub method: Method,
@@ -20,7 +20,7 @@ pub struct UrlEntry {
 /// Allows fetching a stream of UrlEntry items.
 #[derive(Debug)]
 pub struct SiegeUrls {
-    // Something something something
+    default_delay: Duration,
     lines: Lines<BufReader<File>>,
 }
 
@@ -32,7 +32,7 @@ impl Iterator for SiegeUrls {
             let line = self.lines.next();
             if let Some(l) = line {
                 let line = l.unwrap();
-                let entry = parse_line(line.as_str());
+                let entry = parse_line(line.as_str(), self.default_delay.clone());
                 if entry.is_some() {
                     return entry;
                 }
@@ -49,7 +49,7 @@ struct Tokenizer<'a> {
 }
 
 /// Returns a Some(UrlEntry) if line had data in it, or None it was an empty line or a comment.
-fn parse_line(line: &str) -> Option<UrlEntry> {
+fn parse_line(line: &str, default_delay: Duration) -> Option<UrlEntry> {
     // Some experimental results against Siege 4.1.7
     // - Variables can be specified in the url file with `NAME=value` on a single line
     // - Env vars can be referenced in the url file.
@@ -86,6 +86,7 @@ fn parse_line(line: &str) -> Option<UrlEntry> {
     // First item is the URL.
     let item = line.split_once(|c: char| c.is_whitespace());
     let mut entry = UrlEntry {
+        delay: default_delay,
         urlpart: "".to_string(),
         method: Method::GET,
     };
@@ -200,18 +201,19 @@ fn parse_line(line: &str) -> Option<UrlEntry> {
 /// # Panics
 ///
 /// This function panics if lines do not conform to UTF-8, or the file does not exist.
-pub fn load(urls_txt: &Path) -> Vec<UrlEntry> {
+pub fn load(urls_txt: &Path, default_delay: Duration) -> Vec<UrlEntry> {
     let mut entries = vec![];
     for line in BufReader::new(File::open(urls_txt).unwrap()).lines() {
-        if let Some(entry) = parse_line(&line.unwrap()) {
+        if let Some(entry) = parse_line(&line.unwrap(), default_delay) {
             entries.push(entry);
         }
     }
     entries
 }
 
-pub fn load_iter(urls_txt: &Path) -> SiegeUrls {
+pub fn load_iter(urls_txt: &Path, default_delay: Duration) -> SiegeUrls {
     SiegeUrls {
+        default_delay,
         lines: BufReader::new(File::open(urls_txt).unwrap()).lines(),
     }
 }
