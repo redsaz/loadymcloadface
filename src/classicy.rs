@@ -7,7 +7,6 @@ use reqwest::{Method, StatusCode, Url};
 use std::fmt;
 use std::fs::File;
 use std::io::{BufWriter, Write};
-use std::ops::AddAssign;
 use std::thread::{scope, sleep};
 use std::time::{Duration, Instant};
 
@@ -170,7 +169,7 @@ fn logger(rx: Receiver<Sample>) {
     eprintln!("Logging complete. Received {} entries.", count);
 }
 
-pub fn run_traffic(config: Configuration, urls: &mut SiegeUrls) {
+pub fn run_traffic(config: Configuration, urls: Receiver<UrlEntry>) {
     // TODO: A better way to do an end-of-message signal is a completely different channel,
     // or use an enum.
     let stop_logging = Sample {
@@ -232,12 +231,13 @@ pub fn run_traffic(config: Configuration, urls: &mut SiegeUrls) {
         let deadline = start + run_length;
         while start.elapsed() < run_length {
             i += 1;
-            let url_entry = urls.next();
-            if url_entry.is_none() {
+            let url_entry = urls.recv();
+            if url_entry.is_err() {
                 // TODO: start again until time is done.
                 eprintln!("Reached the end of the urls list before the time limit was reached.");
                 break;
             }
+            let url_entry = url_entry.ok();
 
             // I'm sure time will show that this is not ideal: delay is calculated by summing up
             // the total expected delay thus far, find the difference compared to the elapsed

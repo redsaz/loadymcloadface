@@ -1,4 +1,5 @@
 use core::panic;
+use crossbeam::channel::{bounded, Receiver};
 use reqwest::Method;
 use std::{
     fs::File,
@@ -211,9 +212,44 @@ pub fn load(urls_txt: &Path, default_delay: Duration) -> Vec<UrlEntry> {
     entries
 }
 
+/// Iterates over a urls file until it completes.
 pub fn load_iter(urls_txt: &Path, default_delay: Duration) -> SiegeUrls {
     SiegeUrls {
         default_delay,
         lines: BufReader::new(File::open(urls_txt).unwrap()).lines(),
     }
+}
+
+/// Iterates over a urls file and loops to the beginning when the end is reached.
+pub fn load_iter_looping_buffered(urls_txt: &Path, default_delay: Duration) -> Receiver<UrlEntry> {
+    // TODO: Rather than doing all this, why not pass in a callback instead, which can return a
+    // Result<(), DoneSignal> that this function can check if things are done or not?
+    let (tx, rx) = bounded(1000);
+
+    let urls_txt2 = urls_txt.to_path_buf();
+    let default_delay2 = default_delay.clone();
+
+    std::thread::spawn(move || {
+        let mut urls = load_iter(urls_txt2.as_path(), default_delay2);
+        loop {
+            let mut url_entry = urls.next();
+            if url_entry.is_none() {
+                urls = load_iter(urls_txt2.as_path(), default_delay2);
+                url_entry = urls.next();
+                if url_entry.is_none() {
+                    eprintln!("No URLs could be read from file {:?}, leaving.", urls_txt2);
+                    break;
+                }
+            }
+            let url_entry = url_entry.unwrap();
+
+            let err = tx.send(url_entry).err();
+            if err.is_some() {
+                eprintln!("Channel disconnected, will not send any more URLs.");
+                break;
+            }
+        }
+    });
+
+    rx
 }
