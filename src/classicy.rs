@@ -1,5 +1,5 @@
 use crate::configuration::Configuration;
-use crate::siegeurls::{SiegeUrls, UrlEntry};
+use crate::siegeurls::{BodyData, SiegeUrls, UrlEntry};
 use chrono::{DateTime, Utc};
 use crossbeam::channel::{bounded, Receiver, Sender};
 use reqwest::blocking::Client;
@@ -48,9 +48,29 @@ impl fmt::Display for Sample {
     }
 }
 
-fn hit_target(client: &Client, url: &str, method: Method) -> Result<CallResult, reqwest::Error> {
-    // "http://127.0.0.1:8080/logs"
-    let req = client.request(method, url).send()?;
+fn hit_target(
+    client: &Client,
+    baseurl: &Url,
+    url_entry: &UrlEntry,
+) -> Result<CallResult, Box<dyn std::error::Error>> {
+    let url = baseurl.join(&url_entry.urlpart.clone()).unwrap();
+    let method = url_entry.method.clone();
+    let req_builder = client.request(method, url);
+
+    let req_builder = if let Some(content_type) = &url_entry.content_type {
+        req_builder.header("Content-Type", content_type)
+    } else {
+        req_builder
+    };
+
+    let req = match &url_entry.body {
+        BodyData::Content(body) => req_builder.body(body.clone()).send()?,
+        BodyData::File(path) => {
+            let file = std::fs::File::open(path)?;
+            req_builder.body(file).send()?
+        }
+        BodyData::None => req_builder.send()?,
+    };
     let status = req.status();
     let len = req.text()?.len();
 
@@ -86,8 +106,7 @@ fn traffic_user(
         let url_entry = url_entry.unwrap();
         let timestamp = Utc::now();
         let start = Instant::now();
-        let url = &baseurl.join(&url_entry.urlpart.clone()).unwrap();
-        let entry = match hit_target(&client, url.as_str(), url_entry.method.clone()) {
+        let entry = match hit_target(&client, &baseurl, &url_entry) {
             Result::Ok(v) => {
                 let elapsed = start.elapsed();
                 total_duration += elapsed;

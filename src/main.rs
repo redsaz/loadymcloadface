@@ -1,6 +1,9 @@
 use std::{path::Path, time::Duration};
 
-use loadymcloadface::{configuration, siegeurls};
+use loadymcloadface::{
+    configuration,
+    siegeurls::{self, SiegeUrls},
+};
 // use tokio;
 //
 // #[tokio::main(flavor = "multi_thread", worker_threads = 4)]
@@ -19,7 +22,7 @@ fn main() {
     if config.debug {
         eprintln!("Call delay is {}ms", call_delay.as_millis());
     }
-    let mut urls = siegeurls::load_iter_looping_buffered(Path::new("urls.txt"), call_delay);
+    let urls = SiegeUrls::load_iter_looping_buffered(Path::new("urls.txt"), call_delay);
     eprintln!("urls: {:?}", urls);
     loadymcloadface::classicy::run_traffic(config, urls);
 }
