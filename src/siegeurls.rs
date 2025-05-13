@@ -1,6 +1,7 @@
 use core::panic;
 use crossbeam::channel::{bounded, Receiver};
 use reqwest::Method;
+use std::env;
 use std::{
     collections::HashMap,
     fs::File,
@@ -87,20 +88,37 @@ impl SiegeUrls {
         // whitespace), then this is not an assignment line.
         // For example, any of ":", "?", "/", "$" appearing before "=" would be expected for legit
         // URLs.
-        let (name, _value) = assign.unwrap();
+        let (name, value) = assign.unwrap();
         if name.contains(|c: char| !c.is_alphanumeric() && c != '_') {
             return None;
+        }
+
+        // If comment char (#) appears in value side, then remove it and trailing whitespace.
+        if let Some((value, _comment)) = value.split_once('#') {
+            return Some((name, value.trim_end()));
         }
 
         assign
     }
 
+    /// Looks up the value of variable `var_name` and inserts it at the end of updated String.
+    /// If the variable is not found, then the name will be looked up as an environment variable
+    /// and inserted. If the env var is not found, then the default_val is inserted.
     fn insert_val(self: &SiegeUrls, var_name: &str, updated: &mut String, default_val: &str) {
-        let val = self
-            .variables
-            .get(var_name)
-            .map_or(default_val, |s| s.as_str());
-        updated.push_str(val);
+        if let Some(s) = self.variables.get(var_name) {
+            eprintln!("Found var. Name: {} value: {}", var_name, s);
+            updated.push_str(s);
+        } else if let Some(s) = env::var_os(var_name) {
+            let val = s.to_string_lossy();
+            eprintln!("Found env var. Name: {} value: {}", var_name, val);
+            updated.push_str(&val);
+        } else {
+            eprintln!(
+                "Did not find var or env var. Name: {} default: {}",
+                var_name, default_val
+            );
+            updated.push_str(default_val);
+        };
     }
 
     /// Given a line of text, if any `$(VAR_NAME)` is found, text is substituted
@@ -181,7 +199,7 @@ impl SiegeUrls {
                         // A non-alphanumeric-or-underscore char means we've reached the end of the var name
                         if !c.is_alphanumeric() && c != '_' {
                             var_name = &line[var_start..i];
-                            self.insert_val(var_name, &mut updated, &line[(var_start - 1)..i]);
+                            self.insert_val(var_name, &mut updated, "");
                             // Must insert the non-alphanumeric non-underscore char too
                             updated.push(c);
 
@@ -193,11 +211,7 @@ impl SiegeUrls {
                         if c == '}' {
                             if var_start != i {
                                 var_name = &line[var_start..i];
-                                self.insert_val(
-                                    var_name,
-                                    &mut updated,
-                                    &line[(var_start - 2)..(i + 1)],
-                                );
+                                self.insert_val(var_name, &mut updated, "");
                             } else {
                                 // if var_start and i are the same, then "${}" are the latest chars
                                 // TODO: find out how siege handles this. We're going to act as if
@@ -213,11 +227,7 @@ impl SiegeUrls {
                         if c == ')' {
                             if var_start != i {
                                 var_name = &line[var_start..i];
-                                self.insert_val(
-                                    var_name,
-                                    &mut updated,
-                                    &line[(var_start - 2)..(i + 1)],
-                                );
+                                self.insert_val(var_name, &mut updated, "");
                             } else {
                                 // if var_start and i are the same, then "$()" are the latest chars
                                 // TODO: find out how siege handles this. We're going to act as if
@@ -246,7 +256,7 @@ impl SiegeUrls {
                 // ...with a completed no-wrap reference, so look up its var and insert it
                 Mode::RefNoWrap => {
                     var_name = &line[var_start..];
-                    self.insert_val(var_name, &mut updated, &line[(var_start - 1)..]);
+                    self.insert_val(var_name, &mut updated, "");
                 }
                 // ...with an incompleted un-closed reference, so treat the whole ref as a literal
                 Mode::RefWithBrace | Mode::RefWithParen => {
@@ -400,7 +410,35 @@ impl SiegeUrls {
         //   the line would turn into this: http://127.0.0.1:8080/Fred
         //   but it does not, so therefore the comment processing happens later after
         //   variable assignment.
-
+        //
+        // - Here's a normal line that specifies a URL, method, content-type, and body that
+        //   works as expected:
+        //   http://127.0.0.1:8080 POST -T application/json; {"key": "value"}
+        // - What happens when...
+        //   - ...No content-type header is specified?
+        //     http://127.0.0.1:8080 POST {"key": "value"}
+        //     - Then is fine; the content-type header doesn't show up is all.
+        //   - ...No body is specified?
+        //     http://127.0.0.1:8080 POST
+        //     - This is fine; there s a content-length of 0.
+        //   - ...No method is specified, but body is?
+        //     http://127.0.0.1:8080 {"key": "value"}
+        //     - This is NOT fine; it is treated as a GET, and this url is requested:
+        //     http://127.0.0.1:8080%20%7B%22k%22:%20%22v4%22%7D
+        //     - It would've been better if it defaulted to POST when a body is specified.
+        //     - In fact, it is possible for several space-separated tokens to be between the
+        //       URL and the method, and those tokens are treated as part of the URL:
+        //       http://127.0.0.1:8080 this has some more tokens POST {"key": "value"}
+        //       - Siege will find the POST method, and everything up to that point is treated as
+        //         part of the URL.
+        //   - ...There is a comment in the line?
+        //     http://127.0.0.1:8080# This is an example comment
+        //     - Answer: Everything up to the comment is treated as part of the URL, including
+        //       any spaces between the url and the comment char. Yes, really.
+        //   - ...There is a method and a comment?
+        //     http://127.0.0.1:8080 PUT# Comment
+        //     - Answer: The pound and everything past it is considered part of the body.
+        //       - A space between the method and the pound doesn't matter.
         if line.is_empty() || line.chars().all(|c| c.is_whitespace()) {
             // Line is just whitespace or empty, it is not an entry.
             eprintln!("Skip whitespace");
@@ -455,7 +493,8 @@ impl SiegeUrls {
             return Some(entry);
         };
 
-        // Next is the method, if any.
+        // Next MAY be the the method. If the token is not a recognized http method like
+        // GET, PUT, POST, etc) then the token is as a part of the url.
         let item = next.split_once(|c: char| c.is_whitespace());
         eprintln!("Well: {next}");
         if let Some((token, remaining)) = item {

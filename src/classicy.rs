@@ -1,9 +1,9 @@
 use crate::configuration::Configuration;
-use crate::siegeurls::{BodyData, SiegeUrls, UrlEntry};
+use crate::siegeurls::{BodyData, UrlEntry};
 use chrono::{DateTime, Utc};
 use crossbeam::channel::{bounded, Receiver, Sender};
 use reqwest::blocking::Client;
-use reqwest::{Method, StatusCode, Url};
+use reqwest::{StatusCode, Url};
 use std::fmt;
 use std::fs::File;
 use std::io::{BufWriter, Write};
