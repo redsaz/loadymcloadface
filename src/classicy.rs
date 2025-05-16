@@ -3,6 +3,7 @@ use crate::siegeurls::{BodyData, UrlEntry};
 use chrono::{DateTime, Utc};
 use crossbeam::channel::{bounded, Receiver, Sender};
 use reqwest::blocking::Client;
+use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use reqwest::{StatusCode, Url};
 use std::fmt;
 use std::fs::File;
@@ -51,17 +52,30 @@ impl fmt::Display for Sample {
 fn hit_target(
     client: &Client,
     baseurl: &Url,
+    base_headers: &Vec<String>,
     url_entry: &UrlEntry,
 ) -> Result<CallResult, Box<dyn std::error::Error>> {
     let url = baseurl.join(&url_entry.urlpart.clone()).unwrap();
     let method = url_entry.method.clone();
     let req_builder = client.request(method, url);
 
-    let req_builder = if let Some(content_type) = &url_entry.content_type {
+    let mut req_builder = if let Some(content_type) = &url_entry.content_type {
         req_builder.header("Content-Type", content_type)
     } else {
         req_builder
     };
+
+    let mut headers = HeaderMap::with_capacity(base_headers.len());
+    for header in base_headers.iter() {
+        if let Some((name, value)) = header.split_once(':') {
+            eprintln!("Header: name: {} value: {}", name, value);
+            let name = HeaderName::from_bytes(name.trim().as_bytes())?;
+            let value = HeaderValue::from_bytes(value.trim().as_bytes())?;
+            headers.append(name, value);
+        }
+    }
+    eprintln!("Number of headers: {}", base_headers.len());
+    req_builder = req_builder.headers(headers);
 
     let req = match &url_entry.body {
         BodyData::Content(body) => req_builder.body(body.clone()).send()?,
@@ -82,6 +96,7 @@ fn hit_target(
 
 fn traffic_user(
     baseurl: Url,
+    base_headers: Vec<String>,
     thread: usize,
     threads: usize,
     rx: Receiver<Option<UrlEntry>>,
@@ -106,7 +121,7 @@ fn traffic_user(
         let url_entry = url_entry.unwrap();
         let timestamp = Utc::now();
         let start = Instant::now();
-        let entry = match hit_target(&client, &baseurl, &url_entry) {
+        let entry = match hit_target(&client, &baseurl, &base_headers, &url_entry) {
             Result::Ok(v) => {
                 let elapsed = start.elapsed();
                 total_duration += elapsed;
@@ -229,9 +244,11 @@ pub fn run_traffic(config: Configuration, urls: Receiver<UrlEntry>) {
             let thread_client = client.clone();
             let thread_result_tx = result_tx.clone();
             let thread_baseurl = config.baseurl.clone();
+            let thread_base_headers = config.headers.clone();
             let handle = scope.spawn(move || {
                 traffic_user(
                     thread_baseurl,
+                    thread_base_headers,
                     thread,
                     num_threads,
                     thread_rx,

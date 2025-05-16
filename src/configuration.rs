@@ -13,6 +13,8 @@ pub struct Configuration {
     pub debug: bool,
     /// The urls file may be a list of paths, which are tacked on to the end of this base URL.
     pub baseurl: Url,
+    /// A list of headers that are provided for each request.
+    pub headers: Vec<String>,
     /// The maximum number of threads (simultaneous users) that will run. If 0, native number of
     /// cores is used.
     pub threads: usize,
@@ -107,13 +109,19 @@ pub fn config() -> Result<Configuration, ConfigError> {
     let s = Config::builder()
         .add_source(File::with_name(config_file).required(false))
         .add_source(File::with_name(custom_config.as_str()).required(false))
-        .add_source(Environment::with_prefix("loady"))
+        .add_source(
+            Environment::with_prefix("loady")
+                .list_separator("(header)")
+                .with_list_parse_key("headers")
+                .try_parsing(true),
+        )
         .set_default("debug", "false")?
         .set_default("baseurl", "http://localhost/")?
         .set_default("threads", 0)?
         .set_default("rate", "1s")?
         .set_default("time", "1m")?
         .set_default("timeout", "30")?
+        .set_default("headers", Vec::<String>::new())?
         .set_default("identity_pem", Option::None::<String>)?
         .build()?;
 
@@ -124,6 +132,7 @@ pub fn config() -> Result<Configuration, ConfigError> {
         println!("rate: {:?}", s.get::<String>("rate"));
         println!("time: {:?}", s.get::<String>("time"));
         println!("timeout: {:?}", s.get_int("timeout"));
+        println!("headers: {:?}", s.get_array("headers"));
         println!(
             "identity_pem: {:?}",
             s.get::<Option<String>>("identity_pem")
@@ -133,6 +142,7 @@ pub fn config() -> Result<Configuration, ConfigError> {
     Ok(Configuration {
         debug: s.get("debug").unwrap(),
         baseurl: Url::parse(s.get_string("baseurl").unwrap().as_str()).unwrap(),
+        headers: s.get("headers").unwrap(),
         threads: s.get("threads").unwrap(),
         rate: rate_from_string(&s.get_string("rate").unwrap()).unwrap(),
         time: time_from_string(&s.get_string("time").unwrap()).unwrap(),
