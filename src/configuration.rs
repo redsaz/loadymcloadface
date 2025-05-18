@@ -23,6 +23,14 @@ pub struct Configuration {
     /// calls a second, or 0.1m will target 0.1 calls a minute (or 6 calls an hour). If no unit is
     /// specified, calls per second is assumed. Defaults to 1 call a second.
     pub rate: f64,
+    /// node identifier, ranging from 1 to nodes. Typically, the app will run through each url
+    /// entry. This is fine when running a single instance of the app, but when running multiple
+    /// instances of the app concurrently, it may be helpful for the instances to divide the url
+    /// list across all the instances so that they do not duplicate the list.
+    pub node: usize,
+    /// Total number of nodes, default of 1. See the `node` documentation for more info on how this
+    /// divides the url list between the various instances of the app.
+    pub nodes: usize,
     /// How long to run the load test. Can be specified in seconds, minutes, or hours with the
     /// suffixes "s", "m", or "h" respectively. Example: "10s" will run the test for 10 seconds.
     /// If no unit is specified, seconds is assumed. Defaults to 5 minute.
@@ -119,6 +127,8 @@ pub fn config() -> Result<Configuration, ConfigError> {
         .set_default("baseurl", "http://localhost/")?
         .set_default("threads", 0)?
         .set_default("rate", "1s")?
+        .set_default("node", 1)?
+        .set_default("nodes", 1)?
         .set_default("time", "1m")?
         .set_default("timeout", "30")?
         .set_default("headers", Vec::<String>::new())?
@@ -126,14 +136,16 @@ pub fn config() -> Result<Configuration, ConfigError> {
         .build()?;
 
     if s.get_bool("debug").unwrap_or_default() {
-        println!("debug: {:?}", s.get_bool("debug"));
-        println!("baseurl: {:?}", s.get::<String>("baseurl"));
-        println!("threads: {:?}", s.get_int("threads"));
-        println!("rate: {:?}", s.get::<String>("rate"));
-        println!("time: {:?}", s.get::<String>("time"));
-        println!("timeout: {:?}", s.get_int("timeout"));
-        println!("headers: {:?}", s.get_array("headers"));
-        println!(
+        eprintln!("debug: {:?}", s.get_bool("debug"));
+        eprintln!("baseurl: {:?}", s.get::<String>("baseurl"));
+        eprintln!("threads: {:?}", s.get_int("threads"));
+        eprintln!("rate: {:?}", s.get::<String>("rate"));
+        eprintln!("node: {:?}", s.get_int("node"));
+        eprintln!("nodes: {:?}", s.get_int("nodes"));
+        eprintln!("time: {:?}", s.get::<String>("time"));
+        eprintln!("timeout: {:?}", s.get_int("timeout"));
+        eprintln!("headers: {:?}", s.get_array("headers"));
+        eprintln!(
             "identity_pem: {:?}",
             s.get::<Option<String>>("identity_pem")
         );
@@ -145,6 +157,8 @@ pub fn config() -> Result<Configuration, ConfigError> {
         headers: s.get("headers").unwrap(),
         threads: s.get("threads").unwrap(),
         rate: rate_from_string(&s.get_string("rate").unwrap()).unwrap(),
+        node: s.get("node").unwrap(),
+        nodes: s.get("nodes").unwrap(),
         time: time_from_string(&s.get_string("time").unwrap()).unwrap(),
         timeout: Option::Some(Duration::from_secs(s.get("timeout").unwrap())),
         identity_pem: identity_from_string(s.get("identity_pem").unwrap()),

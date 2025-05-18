@@ -1,5 +1,6 @@
 use std::{path::Path, time::Duration};
 
+use chrono::offset;
 use loadymcloadface::{
     configuration,
     siegeurls::{self, SiegeUrls},
@@ -19,10 +20,13 @@ fn main() {
     } else {
         Duration::ZERO
     };
+    let stride = config.nodes;
+    let offset = config.node - 1;
     if config.debug {
         eprintln!("Call delay is {}ms", call_delay.as_millis());
     }
-    let urls = SiegeUrls::load_iter_looping_buffered(Path::new("urls.txt"), call_delay);
+    let urls =
+        SiegeUrls::load_iter_looping_buffered(Path::new("urls.txt"), call_delay, stride, offset);
     eprintln!("urls: {:?}", urls);
     loadymcloadface::classicy::run_traffic(config, urls);
 }

@@ -604,9 +604,24 @@ impl SiegeUrls {
     }
 
     /// Iterates over a urls file and loops to the beginning when the end is reached.
+    ///
+    /// * stride - how many url entries to skip, minimum value must be 1
+    /// * offset - which url entry within the stride to skip, range is 0 to stride - 1
+    ///
+    /// stride and offset allow a url list to be split across different instances of the app
+    /// running concurrently. For example, if running 4 instances, the stride should be `4`,
+    /// and the offset should be `0`, `1`, `2`, `3` in the first, second, third, and fourth
+    /// instances, respectively.
+    ///
+    /// Note that the delay between each call is adjusted to act as if the skipped calls *were*
+    /// called. In other words, if the stride is 4, then the delay between each call is multiplied
+    /// by 4. Additionally, if the offset is non-zero, like say, 1, then the appropriate delay
+    /// will be added to the first call.
     pub fn load_iter_looping_buffered(
         urls_txt: &Path,
         default_delay: Duration,
+        stride: usize,
+        offset: usize,
     ) -> Receiver<UrlEntry> {
         // TODO: Rather than doing all this, why not pass in a callback instead, which can return a
         // Result<(), DoneSignal> that this function can check if things are done or not?
@@ -614,6 +629,8 @@ impl SiegeUrls {
 
         let urls_txt = urls_txt.to_path_buf();
         let default_delay = default_delay.clone();
+        let mut current_offset: usize = 0;
+        let mut added_delay = Duration::ZERO;
 
         std::thread::spawn(move || {
             let mut urls = SiegeUrls::load_iter(urls_txt.as_path(), default_delay);
@@ -631,14 +648,24 @@ impl SiegeUrls {
                     //     break;
                     // }
                 }
-                let url_entry = url_entry.unwrap();
-                eprintln!("Entry: {:?}", url_entry);
+                let mut url_entry = url_entry.unwrap();
+                // Only queue the url entry if we're in the right position to run it, according to
+                // the offset and stride passed in.
+                if current_offset == offset {
+                    let delay = url_entry.delay.saturating_add(added_delay);
+                    url_entry.delay = delay;
+                    added_delay = Duration::ZERO;
+                    eprintln!("Entry: {:?}", url_entry);
 
-                let err = tx.send(url_entry).err();
-                if err.is_some() {
-                    eprintln!("Channel disconnected, will not send any more URLs.");
-                    break;
+                    if let Err(_) = tx.send(url_entry) {
+                        eprintln!("Channel disconnected, will not send any more URLs.");
+                        break;
+                    }
+                } else {
+                    added_delay = added_delay.saturating_add(url_entry.delay);
                 }
+
+                current_offset = (current_offset + 1) % stride;
             }
         });
 
