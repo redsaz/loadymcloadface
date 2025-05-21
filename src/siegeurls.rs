@@ -635,18 +635,18 @@ impl SiegeUrls {
         std::thread::spawn(move || {
             let mut urls = SiegeUrls::load_iter(urls_txt.as_path(), default_delay);
             loop {
-                let url_entry = urls.next();
+                let mut url_entry = urls.next();
                 if url_entry.is_none() {
-                    eprintln!("End of urls file. Done.");
-                    break;
+                    // eprintln!("End of urls file. Done.");
+                    // break;
                     // TODO! THIS IS TEMPORARY. Delete the above eprint and break, and uncomment
                     // the below to allow the function to recycle the file.
-                    // urls = SiegeUrls::load_iter(urls_txt.as_path(), default_delay);
-                    // url_entry = urls.next();
-                    // if url_entry.is_none() {
-                    //     eprintln!("No URLs could be read from file {:?}, leaving.", urls_txt);
-                    //     break;
-                    // }
+                    urls = SiegeUrls::load_iter(urls_txt.as_path(), default_delay);
+                    url_entry = urls.next();
+                    if url_entry.is_none() {
+                        eprintln!("No URLs could be read from file {:?}, leaving.", urls_txt);
+                        break;
+                    }
                 }
                 let mut url_entry = url_entry.unwrap();
                 // Only queue the url entry if we're in the right position to run it, according to

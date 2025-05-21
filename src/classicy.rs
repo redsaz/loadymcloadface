@@ -1,7 +1,7 @@
 use crate::configuration::Configuration;
 use crate::siegeurls::{BodyData, UrlEntry};
 use chrono::{DateTime, Utc};
-use crossbeam::channel::{bounded, Receiver, Sender};
+use crossbeam::channel::{bounded, Receiver, RecvTimeoutError, Sender};
 use reqwest::blocking::Client;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use reqwest::{StatusCode, Url};
@@ -203,6 +203,23 @@ fn logger(rx: Receiver<Sample>) {
     eprintln!("Logging complete. Received {} entries.", count);
 }
 
+fn stats(rx: Receiver<()>) {
+    loop {
+        match rx.recv_timeout(Duration::from_secs(1)) {
+            Err(RecvTimeoutError::Timeout) => {
+                // let mem = memory_stats::memory_stats().unwrap();
+                // eprintln!("Howdy: {:?}", mem);
+            }
+            Err(_) => {
+                eprintln!("Shutting down. Pretend overall stats are printed here.");
+                break;
+            }
+            Ok(_) => eprintln!("Unexpected message sent to stats thread. Ignoring."),
+        }
+    }
+    eprintln!("Stats complete.");
+}
+
 pub fn run_traffic(config: Configuration, urls: Receiver<UrlEntry>) {
     // TODO: A better way to do an end-of-message signal is a completely different channel,
     // or use an enum.
@@ -226,6 +243,7 @@ pub fn run_traffic(config: Configuration, urls: Receiver<UrlEntry>) {
     scope(|scope| {
         let (tx, rx) = bounded(1); // TODO: Make this big again when the main stream isn't used for shutdown as well.
         let (result_tx, result_rx) = bounded(1000);
+        let (stat_tx, stat_rx) = bounded(0);
 
         let mut builder = Client::builder();
         if config.timeout.is_some() {
@@ -260,6 +278,8 @@ pub fn run_traffic(config: Configuration, urls: Receiver<UrlEntry>) {
         }
         // Spin up logger outputter
         let logger_thread = scope.spawn(|| logger(result_rx));
+        // Spin up cpu and mem stats outputter
+        let stats_thread = scope.spawn(|| stats(stat_rx));
         // Send traffic
         let mut i: i64 = 0;
         let start = Instant::now();
@@ -298,6 +318,15 @@ pub fn run_traffic(config: Configuration, urls: Receiver<UrlEntry>) {
             // the same channel, it is possible for the requests to get "backed up".
             tx.send(None).unwrap();
         }
+        // Signal to stats thread to shutdown
+        drop(stat_tx);
+        if let Err(e) = stats_thread.join() {
+            eprintln!(
+                "Failed to signal the stats thread to stop gracefully. Error: {:?}",
+                e
+            );
+        }
+
         // Collect stats
         let total = threads
             .into_iter()
