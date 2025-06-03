@@ -1,5 +1,7 @@
+use std::fmt;
 use std::fs::File;
 use std::io::{BufReader, Read, Result};
+use std::ops::Sub;
 use std::time::{Duration, Instant};
 
 /// Number of cpu ticks per second.
@@ -15,6 +17,20 @@ pub fn init() {
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Debug)]
 pub struct Millicore(u64);
 
+impl fmt::Display for Millicore {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} millicore", self.0)
+    }
+}
+
+impl Sub for Millicore {
+    type Output = Self;
+
+    fn sub(self, other: Self) -> Self::Output {
+        Self(self.0 - other.0)
+    }
+}
+
 pub trait CpuTime {
     fn user(&self) -> Millicore;
     fn system(&self) -> Millicore;
@@ -22,8 +38,16 @@ pub trait CpuTime {
     fn at(&self) -> Instant;
 }
 
+pub trait CpuSpan {
+    fn user(&self) -> Millicore;
+    fn system(&self) -> Millicore;
+    fn elapsed(&self) -> Duration;
+    fn start(&self) -> impl CpuTime;
+    fn end(&self) -> impl CpuTime;
+}
+
 /// Contains (some) information from the `/proc/$pid/stats` file.
-#[derive(Debug)]
+#[derive(Clone, Copy, Hash, Debug)]
 pub struct ProcPidStats {
     /// cpu user time
     user: Millicore,
@@ -33,11 +57,17 @@ pub struct ProcPidStats {
     elapsed: Duration,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Copy, Hash, Debug)]
 pub struct CpuTimeLinux {
     stats: ProcPidStats,
     /// When the stats were captured
     pub captured_at: Instant,
+}
+
+#[derive(Debug)]
+pub struct CpuSpanLinux {
+    start: CpuTimeLinux,
+    end: CpuTimeLinux,
 }
 
 impl ProcPidStats {
@@ -91,6 +121,28 @@ impl ProcPidStats {
     }
 }
 
+impl CpuSpan for CpuSpanLinux {
+    fn user(&self) -> Millicore {
+        self.end.user() - self.start.user()
+    }
+
+    fn system(&self) -> Millicore {
+        self.end.system() - self.start.system()
+    }
+
+    fn elapsed(&self) -> Duration {
+        self.end.elapsed() - self.start.elapsed()
+    }
+
+    fn start(&self) -> impl CpuTime {
+        self.start
+    }
+
+    fn end(&self) -> impl CpuTime {
+        self.end
+    }
+}
+
 impl CpuTimeLinux {
     /// Capture new cpu time. Since this is the first capture, wall clock time is calculated
     /// by also finding out the system's current time and subtracting the process's start time.
@@ -115,13 +167,11 @@ impl CpuTimeLinux {
     /// let overall = start.since(); // Get the stats since the start again, to get overall time.
     /// eprintln!("overall user cpumillis: {}", overall.user_cpumillis());
     /// ```
-    pub fn since(self: &CpuTimeLinux) -> CpuTimeLinux {
-        // Step 1: Use the cpu_ticks-to-time value from self
-        // Step 2: capture /proc/$pid/stat
-        // Step 3: subtract the times
-
-        // TODO: since doesn't work mathematically. Just a rename of init.
-        CpuTimeLinux::init()
+    pub fn since(self: &CpuTimeLinux) -> CpuSpanLinux {
+        CpuSpanLinux {
+            start: self.clone(),
+            end: CpuTimeLinux::init(),
+        }
     }
 }
 

@@ -106,17 +106,11 @@ impl SiegeUrls {
     /// and inserted. If the env var is not found, then the default_val is inserted.
     fn insert_val(self: &SiegeUrls, var_name: &str, updated: &mut String, default_val: &str) {
         if let Some(s) = self.variables.get(var_name) {
-            eprintln!("Found var. Name: {} value: {}", var_name, s);
             updated.push_str(s);
         } else if let Some(s) = env::var_os(var_name) {
             let val = s.to_string_lossy();
-            eprintln!("Found env var. Name: {} value: {}", var_name, val);
             updated.push_str(&val);
         } else {
-            eprintln!(
-                "Did not find var or env var. Name: {} default: {}",
-                var_name, default_val
-            );
             updated.push_str(default_val);
         };
     }
@@ -441,11 +435,9 @@ impl SiegeUrls {
         //       - A space between the method and the pound doesn't matter.
         if line.is_empty() || line.chars().all(|c| c.is_whitespace()) {
             // Line is just whitespace or empty, it is not an entry.
-            eprintln!("Skip whitespace");
             return None;
         } else if line.trim_start().starts_with("#") {
             // Line is a comment, it is not an entry.
-            eprintln!("Skip comment");
             return None;
         }
         // There's better ways of doing this.
@@ -453,22 +445,16 @@ impl SiegeUrls {
         // Either the line is a URL entry, or an assignment...
         // ...if the line is an assignment...
         if let Some((name, value)) = SiegeUrls::parse_assignment(line) {
-            eprintln!(
-                "Found an assignment.\n\tline: {}\n\t name: {}\n\tvalue: {}",
-                line, name, value
-            );
             // Only set the variable if it was never set before (according to experimenting with
             // the siege url file handler.)
             if !self.variables.contains_key(name) {
                 let value = self.replace_vars(value);
-                eprintln!("Adding variable. Name: {} Value: {}", name, value);
                 self.variables.insert(name.to_owned(), value);
             };
             return None;
         }
 
         // ...otherwise, the line is a URL entry, and the first item is the URL
-        eprintln!("Found a url entry. line: {}", line);
         // replacement of vars happens before the parts of the url entry are defined so that the
         // parts could be defined by the var value, if need be.
         let line = self.replace_vars(line);
@@ -496,7 +482,6 @@ impl SiegeUrls {
         // Next MAY be the the method. If the token is not a recognized http method like
         // GET, PUT, POST, etc) then the token is as a part of the url.
         let item = next.split_once(|c: char| c.is_whitespace());
-        eprintln!("Well: {next}");
         if let Some((token, remaining)) = item {
             // There is a method, and more tokens remain
             next = remaining;
@@ -506,7 +491,6 @@ impl SiegeUrls {
             } else {
                 panic!("Not a valid HTTP Method: {}", token);
             }
-            eprintln!("Woo! Method: {:?}", &entry.method);
         } else {
             // There wasn't anything after the method, so we're done.
             let method = Method::from_bytes(next.as_bytes());
@@ -655,7 +639,6 @@ impl SiegeUrls {
                     let delay = url_entry.delay.saturating_add(added_delay);
                     url_entry.delay = delay;
                     added_delay = Duration::ZERO;
-                    eprintln!("Entry: {:?}", url_entry);
 
                     if let Err(_) = tx.send(url_entry) {
                         eprintln!("Channel disconnected, will not send any more URLs.");

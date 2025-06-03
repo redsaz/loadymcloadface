@@ -1,4 +1,5 @@
 use crate::configuration::Configuration;
+use crate::cputime::{self, CpuSpan};
 use crate::siegeurls::{BodyData, UrlEntry};
 use chrono::{DateTime, Utc};
 use crossbeam::channel::{bounded, Receiver, RecvTimeoutError, Sender};
@@ -68,13 +69,11 @@ fn hit_target(
     let mut headers = HeaderMap::with_capacity(base_headers.len());
     for header in base_headers.iter() {
         if let Some((name, value)) = header.split_once(':') {
-            eprintln!("Header: name: {} value: {}", name, value);
             let name = HeaderName::from_bytes(name.trim().as_bytes())?;
             let value = HeaderValue::from_bytes(value.trim().as_bytes())?;
             headers.append(name, value);
         }
     }
-    eprintln!("Number of headers: {}", base_headers.len());
     req_builder = req_builder.headers(headers);
 
     let req = match &url_entry.body {
@@ -285,6 +284,7 @@ pub fn run_traffic(config: Configuration, urls: Receiver<UrlEntry>) {
         let start = Instant::now();
         let mut delay_total: Duration = Duration::ZERO;
         let deadline = start + run_length;
+        let start_cpu = cputime::cpu();
         while start.elapsed() < run_length {
             i += 1;
             let url_entry = urls.recv();
@@ -318,6 +318,9 @@ pub fn run_traffic(config: Configuration, urls: Receiver<UrlEntry>) {
             // the same channel, it is possible for the requests to get "backed up".
             tx.send(None).unwrap();
         }
+
+        let end_cpu = start_cpu.since(); // Capture CPU as soon as job completes.
+
         // Signal to stats thread to shutdown
         drop(stat_tx);
         if let Err(e) = stats_thread.join() {
@@ -332,7 +335,6 @@ pub fn run_traffic(config: Configuration, urls: Receiver<UrlEntry>) {
             .into_iter()
             .map(|t| t.join().unwrap_or(0))
             .fold(0, |acc, x| acc + x);
-        let total_elapsed = start.elapsed();
 
         // Signal to logger thread to shutdown
         if let Err(e) = result_tx.send(stop_logging) {
@@ -345,9 +347,11 @@ pub fn run_traffic(config: Configuration, urls: Receiver<UrlEntry>) {
         }
 
         eprintln!(
-            "After {}ms, made {} calls.",
-            total_elapsed.as_millis(),
-            total
+            "After {}ms, made {} calls. User: {} System: {}",
+            end_cpu.elapsed().as_millis(),
+            total,
+            end_cpu.user(),
+            end_cpu.system()
         );
     });
 }
