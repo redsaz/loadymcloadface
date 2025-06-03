@@ -12,22 +12,25 @@ pub fn init() {
     let _ = &*START_INSTANT;
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Debug)]
+pub struct Millicore(u64);
+
 pub trait CpuTime {
-    fn user(&self) -> Duration;
-    fn system(&self) -> Duration;
-    fn wall(&self) -> Duration;
+    fn user(&self) -> Millicore;
+    fn system(&self) -> Millicore;
+    fn elapsed(&self) -> Duration;
     fn at(&self) -> Instant;
 }
 
 /// Contains (some) information from the `/proc/$pid/stats` file.
 #[derive(Debug)]
 pub struct ProcPidStats {
-    /// cpu user, in cpu_ticks
-    user: u64,
-    /// cpu kernel, in cpu_ticks
-    system: u64,
-    /// wall clock time, a.k.a. real time, a.k.a. elapsed, in seconds
-    wall: u64,
+    /// cpu user time
+    user: Millicore,
+    /// cpu kernel time
+    system: Millicore,
+    /// elapsed time, a.k.a. wall clock time, a.k.a. real time
+    elapsed: Duration,
 }
 
 #[derive(Debug)]
@@ -81,9 +84,9 @@ impl ProcPidStats {
         // TODO: ACTUALLY MAKE THIS
         let sc_clk_tck = *SC_CLK_TCK;
         Result::Ok(ProcPidStats {
-            system: stime.unwrap() * 1000 / sc_clk_tck as u64,
-            user: utime.unwrap() * 1000 / sc_clk_tck as u64,
-            wall: (*START_INSTANT).elapsed().as_millis() as u64,
+            system: Millicore(stime.unwrap() * 1000 / sc_clk_tck as u64),
+            user: Millicore(utime.unwrap() * 1000 / sc_clk_tck as u64),
+            elapsed: (*START_INSTANT).elapsed(),
         })
     }
 }
@@ -107,7 +110,7 @@ impl CpuTimeLinux {
     /// let part1 = start.since();
     /// eprintln!("user cpumillis during part1: {}", part1.user_cpumillis());
     /// // Do more stuff
-    /// let part2 = part2.since();
+    /// let part2 = part1.since();
     /// eprintln!("user cpumillis during part2: {}", part2.user_cpumillis());
     /// let overall = start.since(); // Get the stats since the start again, to get overall time.
     /// eprintln!("overall user cpumillis: {}", overall.user_cpumillis());
@@ -126,14 +129,14 @@ impl CpuTime for CpuTimeLinux {
     fn at(&self) -> Instant {
         self.captured_at
     }
-    fn system(&self) -> Duration {
-        Duration::from_millis(self.stats.system)
+    fn system(&self) -> Millicore {
+        self.stats.system
     }
-    fn user(&self) -> Duration {
-        Duration::from_millis(self.stats.user)
+    fn user(&self) -> Millicore {
+        self.stats.user
     }
-    fn wall(&self) -> Duration {
-        Duration::from_millis(self.stats.wall)
+    fn elapsed(&self) -> Duration {
+        self.stats.elapsed
     }
 }
 
