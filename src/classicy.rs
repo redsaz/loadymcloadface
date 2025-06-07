@@ -1,5 +1,5 @@
 use crate::configuration::Configuration;
-use crate::cputime::{self, CpuSpan};
+use crate::cputime;
 use crate::siegeurls::{BodyData, UrlEntry};
 use chrono::{DateTime, Utc};
 use crossbeam::channel::{bounded, Receiver, RecvTimeoutError, Sender};
@@ -9,12 +9,34 @@ use reqwest::{StatusCode, Url};
 use std::fmt;
 use std::fs::File;
 use std::io::{BufWriter, Write};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::thread::{scope, sleep};
 use std::time::{Duration, Instant};
 
 struct CallResult {
     status: StatusCode,
-    bytes_received: usize,
+    bytes_sent: u64,
+    bytes_received: u64,
+}
+
+struct TotalsSet {
+    success: Totals,
+    error: Totals,
+}
+
+struct Totals {
+    count: AtomicU64,
+    bytes_up: AtomicU64,
+    bytes_down: AtomicU64,
+    elapsed: AtomicU64,
+}
+
+struct LocalTotals {
+    count: u64,
+    bytes_up: u64,
+    bytes_down: u64,
+    elapsed: u64,
 }
 
 // useful jmeter values:
@@ -25,7 +47,8 @@ struct Sample {
     elapsed: Duration,
     success: bool,
     response_code: String,
-    bytes: u64,
+    bytes_up: u64,
+    bytes_down: u64,
     method: String,
     url: String,
     thread: usize,
@@ -36,12 +59,13 @@ impl fmt::Display for Sample {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(
             f,
-            "{},{},{},{},{},{},{},{},{}",
+            "{},{},{},{},{},{},{},{},{},{}",
             self.timestamp.timestamp_millis(),
             self.elapsed.as_millis(),
             self.success,
             self.response_code,
-            self.bytes,
+            self.bytes_up,
+            self.bytes_down,
             self.method,
             self.url,
             self.thread,
@@ -76,20 +100,21 @@ fn hit_target(
     }
     req_builder = req_builder.headers(headers);
 
-    let req = match &url_entry.body {
-        BodyData::Content(body) => req_builder.body(body.clone()).send()?,
+    let (bytes_sent, req) = match &url_entry.body {
+        BodyData::Content(body) => (body.len() as u64, req_builder.body(body.clone()).send()?),
         BodyData::File(path) => {
             let file = std::fs::File::open(path)?;
-            req_builder.body(file).send()?
+            (file.metadata()?.len(), req_builder.body(file).send()?)
         }
-        BodyData::None => req_builder.send()?,
+        BodyData::None => (0u64, req_builder.send()?),
     };
     let status = req.status();
-    let len = req.text()?.len();
+    let bytes_received = req.text()?.len() as u64;
 
     Ok(CallResult {
         status,
-        bytes_received: len,
+        bytes_sent,
+        bytes_received,
     })
 }
 
@@ -135,7 +160,8 @@ fn traffic_user(
                     elapsed,
                     success: v.status.is_success(),
                     response_code: v.status.as_str().to_string(),
-                    bytes: v.bytes_received as u64,
+                    bytes_up: v.bytes_sent,
+                    bytes_down: v.bytes_received,
                     method: url_entry.method.to_string(),
                     url: url_entry.urlpart.to_string(),
                     thread,
@@ -152,7 +178,8 @@ fn traffic_user(
                     elapsed,
                     success: false,
                     response_code: "conn_error".to_string(),
-                    bytes: 0,
+                    bytes_up: 0,
+                    bytes_down: 0,
                     method: url_entry.method.to_string(),
                     url: url_entry.urlpart.to_string(),
                     thread,
@@ -184,7 +211,7 @@ fn traffic_user(
     count
 }
 
-fn logger(rx: Receiver<Sample>) {
+fn logger(rx: Receiver<Sample>, counters: Arc<TotalsSet>) {
     let mut log = BufWriter::new(File::create("results.log").unwrap());
     let mut count = 0;
     loop {
@@ -195,6 +222,20 @@ fn logger(rx: Receiver<Sample>) {
             // between that receiver and the "main" receiver, but this'll do)
             break;
         }
+        let totals = match entry.success {
+            true => &counters.success,
+            false => &counters.error,
+        };
+
+        totals.count.fetch_add(1, Ordering::Relaxed);
+        totals
+            .elapsed
+            .fetch_add(entry.elapsed.as_millis() as u64, Ordering::Relaxed);
+        totals.bytes_up.fetch_add(entry.bytes_up, Ordering::Relaxed);
+        totals
+            .bytes_down
+            .fetch_add(entry.bytes_down, Ordering::Relaxed);
+
         count += 1;
         writeln!(log, "{}", entry).unwrap();
     }
@@ -202,12 +243,194 @@ fn logger(rx: Receiver<Sample>) {
     eprintln!("Logging complete. Received {} entries.", count);
 }
 
-fn stats(rx: Receiver<()>) {
+fn report_stats(
+    job_elapsed: Duration,
+    iter_elapsed: Duration,
+    iter_req_ms_total: u64,
+    iter_reqs: u64,
+    iter_errs: u64,
+    iter_bytes_up: u64,
+    iter_bytes_down: u64,
+    iter_cores: f32,
+) {
+    // Example:
+    // 0:00:01 1707req/s 1225ms/req 99.0%err 123KB/s:up 123KB/s:dn 21.0cores
+
+    // elapsed job time
+    let (h, m, s) = cputime::duration_hms(job_elapsed);
+    eprint!("{}:{:02}:{:02}", h, m, s);
+
+    let iter_ms = iter_elapsed.as_millis() as u64;
+
+    // requests per time period
+    let reqs_sec = iter_reqs * 1000 / iter_ms;
+    if reqs_sec >= 100_000 {
+        // " 100kreq/s"
+        eprint!("{:4.0}kreq/s", reqs_sec / 1000);
+    } else {
+        // 99999req/s
+        eprint!("{:5.0}req/s", reqs_sec);
+    }
+
+    // average response time
+    let ms_req = if iter_reqs > 0 {
+        iter_req_ms_total as f64 / iter_reqs as f64
+    } else {
+        0f64
+    };
+    if ms_req >= 1_000_000f64 {
+        // " 1000s/req" (yikes if this happens)
+        eprint!(" {:5.0}s/req", ms_req / 1000f64);
+    } else if ms_req >= 100_000f64 {
+        // 999.9s/req (yikes if this happens)
+        eprint!(" {:5.1}s/req", ms_req / 1000f64);
+    } else if ms_req >= 10_000f64 {
+        // 99.99s/req
+        eprint!(" {:5.2}s/req", ms_req / 1000f64);
+    } else {
+        // 9999ms/req
+        eprint!(" {:4.0}ms/req", ms_req);
+    }
+
+    // percentage of calls in error
+    let err_perc = if iter_reqs > 0 {
+        iter_errs as f64 / iter_reqs as f64 * 100f64
+    } else {
+        0f64
+    };
+    if err_perc >= 100f64 {
+        // " 100%err"
+        eprint!(" {:4.0}%err", err_perc);
+    } else if err_perc >= 10f64 {
+        // 99.9%err
+        eprint!(" {:4.1}%err", err_perc);
+    } else {
+        // 9.99%err
+        eprint!(" {:4.2}%err", err_perc);
+    }
+
+    // upload rate
+    let rate_up_bytes = iter_bytes_up as f64 * 1000f64 / iter_ms as f64;
+    if rate_up_bytes >= 100_000_000_000f64 {
+        // " 100GB/s:up"
+        eprint!(" {:4.0}GB/s:up", rate_up_bytes / 1_000_000_000f64);
+    } else if rate_up_bytes >= 10_000_000_000f64 {
+        // 99.9GB/s:up
+        eprint!(" {:4.1}GB/s:up", rate_up_bytes / 1_000_000_000f64);
+    } else if rate_up_bytes >= 1_000_000_000f64 {
+        // 9.99GB/s:up
+        eprint!(" {:4.2}GB/s:up", rate_up_bytes / 1_000_000_000f64);
+    } else if rate_up_bytes >= 100_000_000f64 {
+        // " 100MB/s:up"
+        eprint!(" {:4.0}MB/s:up", rate_up_bytes / 1_000_000f64);
+    } else if rate_up_bytes >= 10_000_000f64 {
+        // 99.9MB/s:up
+        eprint!(" {:4.1}MB/s:up", rate_up_bytes / 1_000_000f64);
+    } else if rate_up_bytes >= 1_000_000f64 {
+        // 9.99MB/s:up
+        eprint!(" {:4.2}MB/s:up", rate_up_bytes / 1_000_000f64);
+    } else if rate_up_bytes >= 100_000f64 {
+        // " 100KB/s:up"
+        eprint!(" {:4.0}KB/s:up", rate_up_bytes / 1_000f64);
+    } else if rate_up_bytes >= 10_000f64 {
+        // 99.9KB/s:up
+        eprint!(" {:4.1}KB/s:up", rate_up_bytes / 1_000f64);
+    } else {
+        // 99999B/s:up
+        eprint!(" {:5.0}B/s:up", rate_up_bytes);
+    }
+
+    // download rate
+    let rate_down_bytes = iter_bytes_down as f64 * 1000f64 / iter_ms as f64;
+    if rate_down_bytes >= 100_000_000_000f64 {
+        // " 100GB/s:dn"
+        eprint!(" {:4.0}GB/s:dn", rate_down_bytes / 1_000_000_000f64);
+    } else if rate_down_bytes >= 10_000_000_000f64 {
+        // 99.9GB/s:dn
+        eprint!(" {:4.1}GB/s:dn", rate_down_bytes / 1_000_000_000f64);
+    } else if rate_down_bytes >= 1_000_000_000f64 {
+        // 9.99GB/s:dn
+        eprint!(" {:4.2}GB/s:dn", rate_down_bytes / 1_000_000_000f64);
+    } else if rate_down_bytes >= 100_000_000f64 {
+        // " 100MB/s:dn"
+        eprint!(" {:4.0}MB/s:dn", rate_down_bytes / 1_000_000f64);
+    } else if rate_down_bytes >= 10_000_000f64 {
+        // 99.9MB/s:dn
+        eprint!(" {:4.1}MB/s:dn", rate_down_bytes / 1_000_000f64);
+    } else if rate_down_bytes >= 1_000_000f64 {
+        // 9.99MB/s:dn
+        eprint!(" {:4.2}MB/s:dn", rate_down_bytes / 1_000_000f64);
+    } else if rate_down_bytes >= 100_000f64 {
+        // " 100KB/s:dn"
+        eprint!(" {:4.0}KB/s:dn", rate_down_bytes / 1_000f64);
+    } else if rate_down_bytes >= 10_000f64 {
+        // 99.9KB/s:dn
+        eprint!(" {:4.1}KB/s:dn", rate_down_bytes / 1_000f64);
+    } else {
+        // 99999B/s:dn
+        eprint!(" {:5.0}B/s:dn", rate_down_bytes);
+    }
+
+    // cores used
+    if iter_cores >= 100f32 {
+        // " 100cores"
+        eprintln!(" {:4.0}cores", iter_cores);
+    } else if iter_cores >= 10f32 {
+        // 99.9cores
+        eprintln!(" {:4.1}cores", iter_cores);
+    } else {
+        // 9.99cores
+        eprintln!(" {:4.2}cores", iter_cores);
+    }
+}
+
+fn stats(rx: Receiver<()>, counters: Arc<TotalsSet>) {
+    let job_cpu = cputime::cpu();
+    let mut iter_cpu = job_cpu.clone();
+    // Combine error and success totals for display
+    let mut iter_counter = LocalTotals {
+        bytes_up: 0,
+        bytes_down: 0,
+        count: 0,
+        elapsed: 0,
+    };
+    let mut iter_error_count = 0u64;
     loop {
         match rx.recv_timeout(Duration::from_secs(1)) {
             Err(RecvTimeoutError::Timeout) => {
+                let end_cpu = cputime::cpu();
+                let diff_cpu = end_cpu - iter_cpu;
+                let iter_runtime = diff_cpu.elapsed;
+                iter_cpu = end_cpu;
+                let runtime = end_cpu.elapsed - job_cpu.elapsed;
+                let end_error_count = counters.error.count.load(Ordering::Relaxed);
+                let end_counter = LocalTotals {
+                    count: counters.success.count.load(Ordering::Relaxed) + end_error_count,
+                    bytes_up: counters.success.bytes_up.load(Ordering::Relaxed)
+                        + counters.error.bytes_up.load(Ordering::Relaxed),
+                    bytes_down: counters.success.bytes_down.load(Ordering::Relaxed)
+                        + counters.error.bytes_down.load(Ordering::Relaxed),
+                    elapsed: counters.success.elapsed.load(Ordering::Relaxed)
+                        + counters.error.elapsed.load(Ordering::Relaxed),
+                };
+                let num_calls = end_counter.count - iter_counter.count;
+                let num_errs = end_error_count - iter_error_count;
+                let calls_ms_total = end_counter.elapsed - iter_counter.elapsed;
+                let bytes_up = end_counter.bytes_up - iter_counter.bytes_up;
+                let bytes_down = end_counter.bytes_down - iter_counter.bytes_down;
+                iter_counter = end_counter;
+                iter_error_count = end_error_count;
                 // let mem = memory_stats::memory_stats().unwrap();
-                // eprintln!("Howdy: {:?}", mem);
+                report_stats(
+                    runtime,
+                    iter_runtime,
+                    calls_ms_total,
+                    num_calls,
+                    num_errs,
+                    bytes_up,
+                    bytes_down,
+                    diff_cpu.cpu_cores(),
+                );
             }
             Err(_) => {
                 eprintln!("Shutting down. Pretend overall stats are printed here.");
@@ -227,22 +450,41 @@ pub fn run_traffic(config: Configuration, urls: Receiver<UrlEntry>) {
         elapsed: Duration::MAX,
         success: true,
         response_code: "__END__".to_string(),
-        bytes: 12344321,
+        bytes_up: 12344321,
+        bytes_down: 12344321,
         method: "GET".to_string(),
         url: "hmm".to_string(),
         thread: 0,
         threads: 0,
     };
 
-    let num_threads = std::thread::available_parallelism().map_or(1, |t| t.get());
+    let num_threads = if config.threads == 0 {
+        std::thread::available_parallelism().map_or(1, |t| t.get())
+    } else {
+        config.threads
+    };
     let run_length = config.time;
 
     eprintln!("Using {} threads.", num_threads);
 
     scope(|scope| {
-        let (tx, rx) = bounded(1); // TODO: Make this big again when the main stream isn't used for shutdown as well.
+        let (tx, rx) = bounded(1);
         let (result_tx, result_rx) = bounded(1000);
         let (stat_tx, stat_rx) = bounded(0);
+        let counters = Arc::new(TotalsSet {
+            success: Totals {
+                count: AtomicU64::new(0),
+                bytes_up: AtomicU64::new(0),
+                bytes_down: AtomicU64::new(0),
+                elapsed: AtomicU64::new(0),
+            },
+            error: Totals {
+                count: AtomicU64::new(0),
+                bytes_up: AtomicU64::new(0),
+                bytes_down: AtomicU64::new(0),
+                elapsed: AtomicU64::new(0),
+            },
+        });
 
         let mut builder = Client::builder();
         if config.timeout.is_some() {
@@ -275,10 +517,13 @@ pub fn run_traffic(config: Configuration, urls: Receiver<UrlEntry>) {
             });
             threads.push(handle);
         }
+
         // Spin up logger outputter
-        let logger_thread = scope.spawn(|| logger(result_rx));
+        let counters_a = counters.clone();
+        let logger_thread = scope.spawn(|| logger(result_rx, counters_a));
         // Spin up cpu and mem stats outputter
-        let stats_thread = scope.spawn(|| stats(stat_rx));
+        let counters_b = counters.clone();
+        let stats_thread = scope.spawn(|| stats(stat_rx, counters_b));
         // Send traffic
         let mut i: i64 = 0;
         let start = Instant::now();
@@ -319,7 +564,7 @@ pub fn run_traffic(config: Configuration, urls: Receiver<UrlEntry>) {
             tx.send(None).unwrap();
         }
 
-        let end_cpu = start_cpu.since(); // Capture CPU as soon as job completes.
+        let end_cpu = cputime::cpu(); // Capture CPU as soon as job completes.
 
         // Signal to stats thread to shutdown
         drop(stat_tx);
@@ -346,12 +591,13 @@ pub fn run_traffic(config: Configuration, urls: Receiver<UrlEntry>) {
             eprintln!("Failed to join logger thread. Error: {:?}", e);
         }
 
+        let diff_cpu = end_cpu - start_cpu;
         eprintln!(
             "After {}ms, made {} calls. User: {} System: {}",
-            end_cpu.elapsed().as_millis(),
+            diff_cpu.elapsed.as_millis(),
             total,
-            end_cpu.user(),
-            end_cpu.system()
+            diff_cpu.user.as_millis(),
+            end_cpu.system.as_millis()
         );
     });
 }

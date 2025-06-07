@@ -27,6 +27,5 @@ fn main() {
     eprintln!("urls: {:?}", urls);
     loadymcloadface::classicy::run_traffic(config, urls);
     // this would be nice output maybe?
-    // 00:00:10 | 317 call/s | 65 ms/call | 10 MiB/s | 4.2 %err | 957mcores
-    //    total | 412 call/s | 42 ms/call | 15 MiB/s | 3.1 %err | 942mcores
+    // 0:00:01 1707req/s 1225ms/req 99.0%err 123KB/s:up 123KB/s:dn 21.0cores
 }

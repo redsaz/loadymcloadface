@@ -1,7 +1,6 @@
-use std::fmt;
 use std::fs::File;
 use std::io::{BufReader, Read, Result};
-use std::ops::Sub;
+use std::ops::{Div, Sub};
 use std::time::{Duration, Instant};
 
 /// Number of cpu ticks per second.
@@ -14,63 +13,42 @@ pub fn init() {
     let _ = &*START_INSTANT;
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Debug)]
-pub struct Millicore(u64);
-
-impl fmt::Display for Millicore {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{} millicore", self.0)
-    }
-}
-
-impl Sub for Millicore {
-    type Output = Self;
-
-    fn sub(self, other: Self) -> Self::Output {
-        Self(self.0 - other.0)
-    }
-}
-
-pub trait CpuTime {
-    fn user(&self) -> Millicore;
-    fn system(&self) -> Millicore;
-    fn elapsed(&self) -> Duration;
-    fn at(&self) -> Instant;
-}
-
-pub trait CpuSpan {
-    fn user(&self) -> Millicore;
-    fn system(&self) -> Millicore;
-    fn elapsed(&self) -> Duration;
-    fn start(&self) -> impl CpuTime;
-    fn end(&self) -> impl CpuTime;
-}
-
 /// Contains (some) information from the `/proc/$pid/stats` file.
 #[derive(Clone, Copy, Hash, Debug)]
 pub struct ProcPidStats {
-    /// cpu user time
-    user: Millicore,
-    /// cpu kernel time
-    system: Millicore,
-    /// elapsed time, a.k.a. wall clock time, a.k.a. real time
-    elapsed: Duration,
+    /// elapsed time, a.k.a. wall clock time, a.k.a. real time.
+    pub elapsed: Duration,
+    /// Amount of cpu user time consumed during the elapsed time.
+    /// Multicore can potentially make this greater than elapsed.
+    pub user: Duration,
+    /// Amount of cpu kernel time consumed during the elapsed time.
+    /// Multicore can potentially make this greater than elapsed.
+    pub system: Duration,
 }
+impl Sub for ProcPidStats {
+    type Output = Self;
 
-#[derive(Clone, Copy, Hash, Debug)]
-pub struct CpuTimeLinux {
-    stats: ProcPidStats,
-    /// When the stats were captured
-    pub captured_at: Instant,
+    fn sub(self, other: Self) -> Self::Output {
+        Self {
+            elapsed: self.elapsed - other.elapsed,
+            user: self.user - other.user,
+            system: self.system - other.system,
+        }
+    }
 }
-
-#[derive(Debug)]
-pub struct CpuSpanLinux {
-    start: CpuTimeLinux,
-    end: CpuTimeLinux,
-}
-
 impl ProcPidStats {
+    /// Capture new cpu time. Since this is the first capture, wall clock time is calculated
+    /// by also finding out the system's current time and subtracting the process's start time.
+    pub fn cpu() -> ProcPidStats {
+        ProcPidStats::fetch().expect("Unable to get CPU usage.")
+    }
+
+    /// Returns the amount of cores used.
+    /// This is the system and user times divided by the elapsed time.
+    pub fn cpu_cores(&self) -> f32 {
+        (self.system + self.user).div_duration_f32(self.elapsed)
+    }
+
     fn sc_clk_tck() -> usize {
         // clock ticks is typically 100 Hz
         let tck = unsafe { libc::sysconf(libc::_SC_CLK_TCK) as usize };
@@ -108,88 +86,24 @@ impl ProcPidStats {
             }
         }
 
-        // // Step 2: read /proc/uptime to get uptime (in seconds, including in suspend)
-        // let size = BufReader::new(File::open("/proc/uptime")?).read(&mut buf)?;
-
-        // TODO: ACTUALLY MAKE THIS
         let sc_clk_tck = *SC_CLK_TCK;
         Result::Ok(ProcPidStats {
-            system: Millicore(stime.unwrap() * 1000 / sc_clk_tck as u64),
-            user: Millicore(utime.unwrap() * 1000 / sc_clk_tck as u64),
             elapsed: (*START_INSTANT).elapsed(),
+            system: Duration::from_millis(stime.unwrap() * 1000 / sc_clk_tck as u64),
+            user: Duration::from_millis(utime.unwrap() * 1000 / sc_clk_tck as u64),
         })
     }
 }
 
-impl CpuSpan for CpuSpanLinux {
-    fn user(&self) -> Millicore {
-        self.end.user() - self.start.user()
-    }
-
-    fn system(&self) -> Millicore {
-        self.end.system() - self.start.system()
-    }
-
-    fn elapsed(&self) -> Duration {
-        self.end.elapsed() - self.start.elapsed()
-    }
-
-    fn start(&self) -> impl CpuTime {
-        self.start
-    }
-
-    fn end(&self) -> impl CpuTime {
-        self.end
-    }
+/// Same as calling ProcPidStats::cpu()
+pub fn cpu() -> ProcPidStats {
+    ProcPidStats::cpu()
 }
 
-impl CpuTimeLinux {
-    /// Capture new cpu time. Since this is the first capture, wall clock time is calculated
-    /// by also finding out the system's current time and subtracting the process's start time.
-    pub fn init() -> CpuTimeLinux {
-        let captured_at = Instant::now();
-        let stats = ProcPidStats::fetch().expect("Unable to get CPU usage.");
-
-        CpuTimeLinux { stats, captured_at }
-    }
-
-    /// Capture new cpu time, differenced this cpu time.
-    ///
-    /// # Example:
-    /// ```
-    /// let start = CpuStats::init();
-    /// // Do stuff
-    /// let part1 = start.since();
-    /// eprintln!("user cpumillis during part1: {}", part1.user_cpumillis());
-    /// // Do more stuff
-    /// let part2 = part1.since();
-    /// eprintln!("user cpumillis during part2: {}", part2.user_cpumillis());
-    /// let overall = start.since(); // Get the stats since the start again, to get overall time.
-    /// eprintln!("overall user cpumillis: {}", overall.user_cpumillis());
-    /// ```
-    pub fn since(self: &CpuTimeLinux) -> CpuSpanLinux {
-        CpuSpanLinux {
-            start: self.clone(),
-            end: CpuTimeLinux::init(),
-        }
-    }
-}
-
-impl CpuTime for CpuTimeLinux {
-    fn at(&self) -> Instant {
-        self.captured_at
-    }
-    fn system(&self) -> Millicore {
-        self.stats.system
-    }
-    fn user(&self) -> Millicore {
-        self.stats.user
-    }
-    fn elapsed(&self) -> Duration {
-        self.stats.elapsed
-    }
-}
-
-pub fn cpu() -> CpuTimeLinux {
-    CpuTimeLinux::init()
+pub fn duration_hms(d: Duration) -> (u32, u8, u8) {
+    let sec = d.as_secs();
+    let min = sec / 60 % 60;
+    let hour = sec / 3600;
+    let sec = sec % 60;
+    (hour as u32, min as u8, sec as u8)
 }
