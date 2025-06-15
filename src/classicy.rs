@@ -487,8 +487,10 @@ pub fn run_traffic(config: Configuration, urls: Receiver<UrlEntry>) {
         });
 
         let mut builder = Client::builder();
-        if config.timeout.is_some() {
+        if !config.timeout.is_zero() {
             builder = builder.timeout(config.timeout);
+        } else {
+            builder = builder.timeout(None);
         }
         if config.identity_pem.is_some() {
             builder = builder.identity(config.identity_pem.unwrap());

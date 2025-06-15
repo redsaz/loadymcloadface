@@ -19,8 +19,8 @@ pub struct Configuration {
     /// cores is used.
     pub threads: usize,
     /// The target traffic rate to simulate. Can be specified in calls per second, minute, or
-    /// hour with the suffixes "s", "m", or "h" respectively. Example: "10s" will target 10
-    /// calls a second, or 0.1m will target 0.1 calls a minute (or 6 calls an hour). If no unit is
+    /// hour with the suffixes "/s", "/m", or "/h" respectively. Example: "10/s" will target 10
+    /// calls a second, or 0.1/m will target 0.1 calls a minute (or 6 calls an hour). If no unit is
     /// specified, calls per second is assumed. Defaults to 1 call a second.
     pub rate: f64,
     /// node identifier, ranging from 1 to nodes. Typically, the app will run through each url
@@ -33,31 +33,31 @@ pub struct Configuration {
     pub nodes: usize,
     /// How long to run the load test. Can be specified in seconds, minutes, or hours with the
     /// suffixes "s", "m", or "h" respectively. Example: "10s" will run the test for 10 seconds.
-    /// If no unit is specified, seconds is assumed. Defaults to 5 minute.
+    /// If no unit is specified, seconds is assumed. Defaults to 5 minutes.
     pub time: Duration,
-    /// How long to wait for the entirety of connecting, writing, and reading before closing,
-    /// in seconds. By default the timeout is 30 seconds. If 0, there is no timeout.
-    pub timeout: Option<Duration>,
+    /// How long to wait for the entirety of connecting, writing, and reading before closing.
+    /// Specified in milliseconds, seconds, or minutes with the suffixes "ms", "s", or "m".
+    /// If 0, there is no timeout. Defaults to 30 seconds.
+    pub timeout: Duration,
     /// Pass a client cert for each request for mTLS, if defined with the path to a pem file that
     /// contains both the cert and key. By default this is undefined.
     pub identity_pem: Option<Identity>,
 }
 
 fn rate_from_string(rate_str: &str) -> Result<f64, ConfigError> {
-    let unit = rate_str.to_lowercase().chars().last().unwrap();
-    let amount = if unit.is_alphabetic() {
-        rate_str[..rate_str.len() - 1]
-            .to_string()
-            .parse::<f64>()
-            .unwrap()
+    let unit =
+        rate_str.find(|c: char| c == '/' || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'));
+    let (unit, amount) = if let Some(idx) = unit {
+        (&rate_str[idx..], rate_str[..idx].parse::<f64>().unwrap())
     } else {
-        rate_str.parse::<f64>().unwrap()
+        ("s", rate_str.parse::<f64>().unwrap())
     };
 
     match unit {
-        's' | '0'..'9' | '.' => Ok(amount),
-        'm' => Ok(amount / 60.0),
-        'h' => Ok(amount / 3600.0),
+        "ms" | "/ms" => Ok(amount * 1000.0),
+        "s" | "/s" => Ok(amount),
+        "m" | "/m" => Ok(amount / 60.0),
+        "h" | "/h" => Ok(amount / 3600.0),
         _ => Err(ConfigError::Message(
             "Unknown unit specified for rate.".to_string(),
         )),
@@ -65,20 +65,19 @@ fn rate_from_string(rate_str: &str) -> Result<f64, ConfigError> {
 }
 
 fn time_from_string(time_str: &str) -> Result<Duration, ConfigError> {
-    let unit = time_str.to_lowercase().chars().last().unwrap();
-    let amount = if unit.is_alphabetic() {
-        time_str[..time_str.len() - 1]
-            .to_string()
-            .parse::<u64>()
-            .unwrap()
+    let unit =
+        time_str.find(|c: char| c == '/' || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'));
+    let (unit, amount) = if let Some(idx) = unit {
+        (&time_str[idx..], time_str[..idx].parse::<f64>().unwrap())
     } else {
-        time_str.parse::<u64>().unwrap()
+        ("s", time_str.parse::<f64>().unwrap())
     };
 
     match unit {
-        's' | '0'..'9' => Ok(Duration::from_secs(amount)),
-        'm' => Ok(Duration::from_secs(amount * 60)),
-        'h' => Ok(Duration::from_secs(amount * 3600)),
+        "ms" => Ok(Duration::from_secs_f64(amount / 1000.0)),
+        "s" => Ok(Duration::from_secs_f64(amount)),
+        "m" => Ok(Duration::from_secs_f64(amount * 60.0)),
+        "h" => Ok(Duration::from_secs_f64(amount * 3600.0)),
         _ => Err(ConfigError::Message(
             "Unknown unit specified for duration.".to_string(),
         )),
@@ -143,7 +142,7 @@ pub fn config() -> Result<Configuration, ConfigError> {
         eprintln!("node: {:?}", s.get_int("node"));
         eprintln!("nodes: {:?}", s.get_int("nodes"));
         eprintln!("time: {:?}", s.get::<String>("time"));
-        eprintln!("timeout: {:?}", s.get_int("timeout"));
+        eprintln!("timeout: {:?}", s.get::<String>("time"));
         eprintln!("headers: {:?}", s.get_array("headers"));
         eprintln!(
             "identity_pem: {:?}",
@@ -160,7 +159,7 @@ pub fn config() -> Result<Configuration, ConfigError> {
         node: s.get("node").unwrap(),
         nodes: s.get("nodes").unwrap(),
         time: time_from_string(&s.get_string("time").unwrap()).unwrap(),
-        timeout: Option::Some(Duration::from_secs(s.get("timeout").unwrap())),
+        timeout: time_from_string(&s.get_string("timeout").unwrap()).unwrap(),
         identity_pem: identity_from_string(s.get("identity_pem").unwrap()),
     })
 }
