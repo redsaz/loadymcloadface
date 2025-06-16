@@ -258,7 +258,7 @@ fn report_stats(
 
     // elapsed job time
     let (h, m, s) = cputime::duration_hms(job_elapsed);
-    eprint!("{}:{:02}:{:02}", h, m, s);
+    print!("{}:{:02}:{:02}", h, m, s);
 
     let iter_ms = iter_elapsed.as_millis() as u64;
 
@@ -266,10 +266,10 @@ fn report_stats(
     let reqs_sec = iter_reqs * 1000 / iter_ms;
     if reqs_sec >= 100_000 {
         // " 100kreq/s"
-        eprint!("{:4.0}kreq/s", reqs_sec / 1000);
+        print!("{:4.0}kreq/s", reqs_sec / 1000);
     } else {
         // 99999req/s
-        eprint!("{:5.0}req/s", reqs_sec);
+        print!("{:5.0}req/s", reqs_sec);
     }
 
     // average response time
@@ -280,16 +280,16 @@ fn report_stats(
     };
     if ms_req >= 1_000_000f64 {
         // " 1000s/req" (yikes if this happens)
-        eprint!(" {:5.0}s/req", ms_req / 1000f64);
+        print!(" {:5.0}s/req", ms_req / 1000f64);
     } else if ms_req >= 100_000f64 {
         // 999.9s/req (yikes if this happens)
-        eprint!(" {:5.1}s/req", ms_req / 1000f64);
+        print!(" {:5.1}s/req", ms_req / 1000f64);
     } else if ms_req >= 10_000f64 {
         // 99.99s/req
-        eprint!(" {:5.2}s/req", ms_req / 1000f64);
+        print!(" {:5.2}s/req", ms_req / 1000f64);
     } else {
         // 9999ms/req
-        eprint!(" {:4.0}ms/req", ms_req);
+        print!(" {:4.0}ms/req", ms_req);
     }
 
     // percentage of calls in error
@@ -300,87 +300,87 @@ fn report_stats(
     };
     if err_perc >= 100f64 {
         // " 100%err"
-        eprint!(" {:4.0}%err", err_perc);
+        print!(" {:4.0}%err", err_perc);
     } else if err_perc >= 10f64 {
         // 99.9%err
-        eprint!(" {:4.1}%err", err_perc);
+        print!(" {:4.1}%err", err_perc);
     } else {
         // 9.99%err
-        eprint!(" {:4.2}%err", err_perc);
+        print!(" {:4.2}%err", err_perc);
     }
 
     // upload rate
     let rate_up_bytes = iter_bytes_up as f64 * 1000f64 / iter_ms as f64;
     if rate_up_bytes >= 100_000_000_000f64 {
         // " 100GB/s:up"
-        eprint!(" {:4.0}GB/s:up", rate_up_bytes / 1_000_000_000f64);
+        print!(" {:4.0}GB/s:up", rate_up_bytes / 1_000_000_000f64);
     } else if rate_up_bytes >= 10_000_000_000f64 {
         // 99.9GB/s:up
-        eprint!(" {:4.1}GB/s:up", rate_up_bytes / 1_000_000_000f64);
+        print!(" {:4.1}GB/s:up", rate_up_bytes / 1_000_000_000f64);
     } else if rate_up_bytes >= 1_000_000_000f64 {
         // 9.99GB/s:up
-        eprint!(" {:4.2}GB/s:up", rate_up_bytes / 1_000_000_000f64);
+        print!(" {:4.2}GB/s:up", rate_up_bytes / 1_000_000_000f64);
     } else if rate_up_bytes >= 100_000_000f64 {
         // " 100MB/s:up"
-        eprint!(" {:4.0}MB/s:up", rate_up_bytes / 1_000_000f64);
+        print!(" {:4.0}MB/s:up", rate_up_bytes / 1_000_000f64);
     } else if rate_up_bytes >= 10_000_000f64 {
         // 99.9MB/s:up
-        eprint!(" {:4.1}MB/s:up", rate_up_bytes / 1_000_000f64);
+        print!(" {:4.1}MB/s:up", rate_up_bytes / 1_000_000f64);
     } else if rate_up_bytes >= 1_000_000f64 {
         // 9.99MB/s:up
-        eprint!(" {:4.2}MB/s:up", rate_up_bytes / 1_000_000f64);
+        print!(" {:4.2}MB/s:up", rate_up_bytes / 1_000_000f64);
     } else if rate_up_bytes >= 100_000f64 {
         // " 100KB/s:up"
-        eprint!(" {:4.0}KB/s:up", rate_up_bytes / 1_000f64);
+        print!(" {:4.0}KB/s:up", rate_up_bytes / 1_000f64);
     } else if rate_up_bytes >= 10_000f64 {
         // 99.9KB/s:up
-        eprint!(" {:4.1}KB/s:up", rate_up_bytes / 1_000f64);
+        print!(" {:4.1}KB/s:up", rate_up_bytes / 1_000f64);
     } else {
         // 99999B/s:up
-        eprint!(" {:5.0}B/s:up", rate_up_bytes);
+        print!(" {:5.0}B/s:up", rate_up_bytes);
     }
 
     // download rate
     let rate_down_bytes = iter_bytes_down as f64 * 1000f64 / iter_ms as f64;
     if rate_down_bytes >= 100_000_000_000f64 {
         // " 100GB/s:dn"
-        eprint!(" {:4.0}GB/s:dn", rate_down_bytes / 1_000_000_000f64);
+        print!(" {:4.0}GB/s:dn", rate_down_bytes / 1_000_000_000f64);
     } else if rate_down_bytes >= 10_000_000_000f64 {
         // 99.9GB/s:dn
-        eprint!(" {:4.1}GB/s:dn", rate_down_bytes / 1_000_000_000f64);
+        print!(" {:4.1}GB/s:dn", rate_down_bytes / 1_000_000_000f64);
     } else if rate_down_bytes >= 1_000_000_000f64 {
         // 9.99GB/s:dn
-        eprint!(" {:4.2}GB/s:dn", rate_down_bytes / 1_000_000_000f64);
+        print!(" {:4.2}GB/s:dn", rate_down_bytes / 1_000_000_000f64);
     } else if rate_down_bytes >= 100_000_000f64 {
         // " 100MB/s:dn"
-        eprint!(" {:4.0}MB/s:dn", rate_down_bytes / 1_000_000f64);
+        print!(" {:4.0}MB/s:dn", rate_down_bytes / 1_000_000f64);
     } else if rate_down_bytes >= 10_000_000f64 {
         // 99.9MB/s:dn
-        eprint!(" {:4.1}MB/s:dn", rate_down_bytes / 1_000_000f64);
+        print!(" {:4.1}MB/s:dn", rate_down_bytes / 1_000_000f64);
     } else if rate_down_bytes >= 1_000_000f64 {
         // 9.99MB/s:dn
-        eprint!(" {:4.2}MB/s:dn", rate_down_bytes / 1_000_000f64);
+        print!(" {:4.2}MB/s:dn", rate_down_bytes / 1_000_000f64);
     } else if rate_down_bytes >= 100_000f64 {
         // " 100KB/s:dn"
-        eprint!(" {:4.0}KB/s:dn", rate_down_bytes / 1_000f64);
+        print!(" {:4.0}KB/s:dn", rate_down_bytes / 1_000f64);
     } else if rate_down_bytes >= 10_000f64 {
         // 99.9KB/s:dn
-        eprint!(" {:4.1}KB/s:dn", rate_down_bytes / 1_000f64);
+        print!(" {:4.1}KB/s:dn", rate_down_bytes / 1_000f64);
     } else {
         // 99999B/s:dn
-        eprint!(" {:5.0}B/s:dn", rate_down_bytes);
+        print!(" {:5.0}B/s:dn", rate_down_bytes);
     }
 
     // cores used
     if iter_cores >= 100f32 {
         // " 100cores"
-        eprintln!(" {:4.0}cores", iter_cores);
+        println!(" {:4.0}cores", iter_cores);
     } else if iter_cores >= 10f32 {
         // 99.9cores
-        eprintln!(" {:4.1}cores", iter_cores);
+        println!(" {:4.1}cores", iter_cores);
     } else {
         // 9.99cores
-        eprintln!(" {:4.2}cores", iter_cores);
+        println!(" {:4.2}cores", iter_cores);
     }
 }
 
