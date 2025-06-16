@@ -11,6 +11,10 @@ use loadymcloadface::{configuration, cputime, siegeurls::SiegeUrls};
 fn main() {
     cputime::init();
     let config = configuration::config().expect("LoadyMcLoadface is misconfigured.");
+    let logger_env = env_logger::Env::new()
+        .filter("LOADY_LOG")
+        .write_style("LOADY_LOG_STYLE");
+    env_logger::init_from_env(logger_env);
     let calls_per_sec = config.rate;
     let call_delay = if calls_per_sec != 0_f64 {
         Duration::from_secs_f64(1_f64 / calls_per_sec)

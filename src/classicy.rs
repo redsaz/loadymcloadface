@@ -3,6 +3,7 @@ use crate::cputime;
 use crate::siegeurls::{BodyData, UrlEntry};
 use chrono::{DateTime, Utc};
 use crossbeam::channel::{bounded, Receiver, RecvTimeoutError, Sender};
+use log::debug;
 use reqwest::blocking::Client;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use reqwest::{StatusCode, Url};
@@ -495,6 +496,7 @@ pub fn run_traffic(config: Configuration, urls: Receiver<UrlEntry>) {
         if config.identity_pem.is_some() {
             builder = builder.identity(config.identity_pem.unwrap());
         }
+        // builder = builder.pool_max_idle_per_host(0);
         let client = builder.build().unwrap();
 
         let mut threads = Vec::with_capacity(num_threads);
@@ -559,6 +561,7 @@ pub fn run_traffic(config: Configuration, urls: Receiver<UrlEntry>) {
 
             tx.send_deadline(url_entry, deadline).unwrap_or_default();
         }
+        debug!("Shutting down threads.");
         // Signal to all traffic generator threads to shutdown
         for _ in 0..num_threads {
             // TODO: Make the shutdown signal in a different channel, because when it is in
