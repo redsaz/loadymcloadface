@@ -466,6 +466,20 @@ pub fn run_traffic(config: Configuration, urls: Receiver<UrlEntry>) {
     };
     let run_length = config.time;
 
+    // Add the Connection header according to connection config, if the header isn't already there.
+    let mut headers = config.headers.clone();
+    if headers
+        .iter()
+        .find(|header| header.to_ascii_lowercase().starts_with("connection:"))
+        .is_none()
+    {
+        if config.connection.eq_ignore_ascii_case("keep-alive") {
+            headers.push("Connection: keep-alive".to_owned());
+        } else {
+            headers.push("Connection: close".to_owned());
+        }
+    }
+
     eprintln!("Using {} threads.", num_threads);
 
     scope(|scope| {
@@ -496,7 +510,9 @@ pub fn run_traffic(config: Configuration, urls: Receiver<UrlEntry>) {
         if config.identity_pem.is_some() {
             builder = builder.identity(config.identity_pem.unwrap());
         }
-        // builder = builder.pool_max_idle_per_host(0);
+        if !config.connection.eq_ignore_ascii_case("keep-alive") {
+            builder = builder.pool_max_idle_per_host(0);
+        }
         let client = builder.build().unwrap();
 
         let mut threads = Vec::with_capacity(num_threads);
@@ -507,7 +523,7 @@ pub fn run_traffic(config: Configuration, urls: Receiver<UrlEntry>) {
             let thread_client = client.clone();
             let thread_result_tx = result_tx.clone();
             let thread_baseurl = config.baseurl.clone();
-            let thread_base_headers = config.headers.clone();
+            let thread_base_headers = headers.clone();
             let handle = scope.spawn(move || {
                 traffic_user(
                     thread_baseurl,

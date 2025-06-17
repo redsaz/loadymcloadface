@@ -13,6 +13,10 @@ pub struct Configuration {
     pub debug: bool,
     /// The urls file may be a list of paths, which are tacked on to the end of this base URL.
     pub baseurl: Url,
+    /// Whether to have a connection keep-alive or close after every http transaction.
+    /// keep-alive will use connection pools, and add a "Connection: keep-alive" header.
+    /// close will turn off connection pools, and adds a "Connection: close" header.
+    pub connection: String,
     /// A list of headers that are provided for each request.
     pub headers: Vec<String>,
     /// The maximum number of threads (simultaneous users) that will run. If 0, native number of
@@ -130,6 +134,7 @@ pub fn config() -> Result<Configuration, ConfigError> {
         .set_default("nodes", 1)?
         .set_default("time", "1m")?
         .set_default("timeout", "30")?
+        .set_default("connection", "keep-alive")?
         .set_default("headers", Vec::<String>::new())?
         .set_default("identity_pem", Option::None::<String>)?
         .build()?;
@@ -142,7 +147,8 @@ pub fn config() -> Result<Configuration, ConfigError> {
         eprintln!("node: {:?}", s.get_int("node"));
         eprintln!("nodes: {:?}", s.get_int("nodes"));
         eprintln!("time: {:?}", s.get::<String>("time"));
-        eprintln!("timeout: {:?}", s.get::<String>("time"));
+        eprintln!("timeout: {:?}", s.get::<String>("timeout"));
+        eprintln!("connection: {:?}", s.get::<String>("connection"));
         eprintln!("headers: {:?}", s.get_array("headers"));
         eprintln!(
             "identity_pem: {:?}",
@@ -153,6 +159,7 @@ pub fn config() -> Result<Configuration, ConfigError> {
     Ok(Configuration {
         debug: s.get("debug").unwrap(),
         baseurl: Url::parse(s.get_string("baseurl").unwrap().as_str()).unwrap(),
+        connection: s.get("connection").unwrap(),
         headers: s.get("headers").unwrap(),
         threads: s.get("threads").unwrap(),
         rate: rate_from_string(&s.get_string("rate").unwrap()).unwrap(),
