@@ -46,6 +46,8 @@ pub struct Configuration {
     /// Pass a client cert for each request for mTLS, if defined with the path to a pem file that
     /// contains both the cert and key. By default this is undefined.
     pub identity_pem: Option<Identity>,
+    /// How often to report the run's statistics. Defaults to 10 seconds.
+    pub stat_period: Duration,
 }
 
 fn rate_from_string(rate_str: &str) -> Result<f64, ConfigError> {
@@ -137,6 +139,7 @@ pub fn config() -> Result<Configuration, ConfigError> {
         .set_default("connection", "keep-alive")?
         .set_default("headers", Vec::<String>::new())?
         .set_default("identity_pem", Option::None::<String>)?
+        .set_default("stat_period", "10s")?
         .build()?;
 
     if s.get_bool("debug").unwrap_or_default() {
@@ -154,6 +157,7 @@ pub fn config() -> Result<Configuration, ConfigError> {
             "identity_pem: {:?}",
             s.get::<Option<String>>("identity_pem")
         );
+        eprintln!("stat_period: {:?}", s.get::<String>("stat_rate"));
     }
 
     Ok(Configuration {
@@ -168,5 +172,6 @@ pub fn config() -> Result<Configuration, ConfigError> {
         time: time_from_string(&s.get_string("time").unwrap()).unwrap(),
         timeout: time_from_string(&s.get_string("timeout").unwrap()).unwrap(),
         identity_pem: identity_from_string(s.get("identity_pem").unwrap()),
+        stat_period: time_from_string(&s.get_string("stat_period").unwrap()).unwrap(),
     })
 }

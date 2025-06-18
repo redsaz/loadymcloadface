@@ -265,12 +265,12 @@ fn report_stats(
 
     // requests per time period
     let reqs_sec = iter_reqs * 1000 / iter_ms;
-    if reqs_sec >= 100_000 {
-        // " 100kreq/s"
-        print!("{:4.0}kreq/s", reqs_sec / 1000);
+    if reqs_sec >= 10_000 {
+        // " 10kreq/s"
+        print!(" {:3.0}kreq/s", reqs_sec / 1000);
     } else {
-        // 99999req/s
-        print!("{:5.0}req/s", reqs_sec);
+        // 9999req/s
+        print!(" {:4.0}req/s", reqs_sec);
     }
 
     // average response time
@@ -288,6 +288,10 @@ fn report_stats(
     } else if ms_req >= 10_000f64 {
         // 99.99s/req
         print!(" {:5.2}s/req", ms_req / 1000f64);
+    } else if ms_req < 0.001f64 && ms_req > 0f64 {
+        print!(" {:4.0}ns/req", ms_req * 1_000_000f64);
+    } else if ms_req < 1f64 && ms_req > 0f64 {
+        print!(" {:4.0}μs/req", ms_req * 1000f64);
     } else {
         // 9999ms/req
         print!(" {:4.0}ms/req", ms_req);
@@ -385,7 +389,7 @@ fn report_stats(
     }
 }
 
-fn stats(rx: Receiver<()>, counters: Arc<TotalsSet>) {
+fn stats(rx: Receiver<()>, counters: Arc<TotalsSet>, stat_period: Duration) {
     let job_cpu = cputime::cpu();
     let mut iter_cpu = job_cpu.clone();
     // Combine error and success totals for display
@@ -397,7 +401,7 @@ fn stats(rx: Receiver<()>, counters: Arc<TotalsSet>) {
     };
     let mut iter_error_count = 0u64;
     loop {
-        match rx.recv_timeout(Duration::from_secs(1)) {
+        match rx.recv_timeout(stat_period) {
             Err(RecvTimeoutError::Timeout) => {
                 let end_cpu = cputime::cpu();
                 let diff_cpu = end_cpu - iter_cpu;
@@ -543,7 +547,7 @@ pub fn run_traffic(config: Configuration, urls: Receiver<UrlEntry>) {
         let logger_thread = scope.spawn(|| logger(result_rx, counters_a));
         // Spin up cpu and mem stats outputter
         let counters_b = counters.clone();
-        let stats_thread = scope.spawn(|| stats(stat_rx, counters_b));
+        let stats_thread = scope.spawn(|| stats(stat_rx, counters_b, config.stat_period));
         // Send traffic
         let mut i: i64 = 0;
         let start = Instant::now();
