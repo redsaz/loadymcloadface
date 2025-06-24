@@ -505,7 +505,7 @@ pub fn run_traffic(config: Configuration, urls: Receiver<UrlEntry>) {
             },
         });
 
-        let mut builder = Client::builder();
+        let mut builder = Client::builder().user_agent(config.user_agent);
         if !config.timeout.is_zero() {
             builder = builder.timeout(config.timeout);
         } else {
@@ -517,6 +517,7 @@ pub fn run_traffic(config: Configuration, urls: Receiver<UrlEntry>) {
         if !config.connection.eq_ignore_ascii_case("keep-alive") {
             builder = builder.pool_max_idle_per_host(0);
         }
+
         let client = builder.build().unwrap();
 
         let mut threads = Vec::with_capacity(num_threads);

@@ -48,6 +48,8 @@ pub struct Configuration {
     pub identity_pem: Option<Identity>,
     /// How often to report the run's statistics. Defaults to 10 seconds.
     pub stat_period: Duration,
+    /// The user agent to send with each request.
+    pub user_agent: String,
 }
 
 fn rate_from_string(rate_str: &str) -> Result<f64, ConfigError> {
@@ -140,6 +142,10 @@ pub fn config() -> Result<Configuration, ConfigError> {
         .set_default("headers", Vec::<String>::new())?
         .set_default("identity_pem", Option::None::<String>)?
         .set_default("stat_period", "10s")?
+        .set_default(
+            "user_agent",
+            format!("loadymcloadface/{}", env!("CARGO_PKG_VERSION")),
+        )?
         .build()?;
 
     if s.get_bool("debug").unwrap_or_default() {
@@ -173,5 +179,6 @@ pub fn config() -> Result<Configuration, ConfigError> {
         timeout: time_from_string(&s.get_string("timeout").unwrap()).unwrap(),
         identity_pem: identity_from_string(s.get("identity_pem").unwrap()),
         stat_period: time_from_string(&s.get_string("stat_period").unwrap()).unwrap(),
+        user_agent: s.get("user_agent").unwrap(),
     })
 }
