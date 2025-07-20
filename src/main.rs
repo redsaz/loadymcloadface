@@ -28,7 +28,6 @@ fn main() {
     }
     let urls =
         SiegeUrls::load_iter_looping_buffered(Path::new("urls.txt"), call_delay, stride, offset);
-    eprintln!("urls: {:?}", urls);
     loadymcloadface::classicy::run_traffic(config, urls);
     // this would be nice output maybe?
     // 0:00:01 1707req/s 1225ms/req 99.0%err 123KB/s:up 123KB/s:dn 21.0cores

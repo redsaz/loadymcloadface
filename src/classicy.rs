@@ -1,12 +1,13 @@
 use crate::configuration::Configuration;
 use crate::cputime;
 use crate::siegeurls::{BodyData, UrlEntry};
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, FixedOffset, Utc};
 use crossbeam::channel::{bounded, Receiver, RecvTimeoutError, Sender};
 use log::debug;
 use reqwest::blocking::Client;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use reqwest::{StatusCode, Url};
+use std::cmp::min;
 use std::fmt;
 use std::fs::File;
 use std::io::{BufWriter, Write};
@@ -447,6 +448,46 @@ fn stats(rx: Receiver<()>, counters: Arc<TotalsSet>, stat_period: Duration) {
     eprintln!("Stats complete.");
 }
 
+fn wait_for_start(start_at: Option<DateTime<FixedOffset>>) {
+    if let Some(start_at) = start_at {
+        let minutes_away = (start_at - Utc::now().fixed_offset()).num_minutes();
+        if minutes_away > 2 {
+            eprintln!(
+                "Warning: starting at {} which is {} minutes away.",
+                start_at, minutes_away
+            );
+        } else if start_at > Utc::now() {
+            eprintln!(
+                "Starting at {} in {} seconds.",
+                start_at,
+                (start_at - Utc::now().fixed_offset()).num_seconds()
+            );
+        } else {
+            eprintln!(
+                "Scheduled to start at {} (in the past). Will start ASAP.",
+                start_at
+            );
+        }
+        let ms_away = (start_at - Utc::now().fixed_offset()).num_milliseconds() - 10_000;
+        if ms_away > 0 {
+            let ms_delay = Duration::from_millis(ms_away as u64);
+            sleep(ms_delay);
+        }
+        loop {
+            let ms_away = (start_at - Utc::now().fixed_offset()).num_milliseconds();
+            if ms_away > 0 {
+                eprint!("{}...", f64::round(ms_away as f64 / 1000 as f64));
+                let ms_delay = Duration::from_millis(min(ms_away as u64, 1000));
+                sleep(ms_delay);
+            } else {
+                eprintln!();
+                break;
+            }
+        }
+    }
+    eprintln!("Starting job NOW.");
+}
+
 pub fn run_traffic(config: Configuration, urls: Receiver<UrlEntry>) {
     // TODO: A better way to do an end-of-message signal is a completely different channel,
     // or use an enum.
@@ -546,17 +587,20 @@ pub fn run_traffic(config: Configuration, urls: Receiver<UrlEntry>) {
         // Spin up logger outputter
         let counters_a = counters.clone();
         let logger_thread = scope.spawn(|| logger(result_rx, counters_a));
+
+        // If job must start at a specifc time, wait until then.
+        wait_for_start(config.start_at);
+
         // Spin up cpu and mem stats outputter
         let counters_b = counters.clone();
         let stats_thread = scope.spawn(|| stats(stat_rx, counters_b, config.stat_period));
+
         // Send traffic
-        let mut i: i64 = 0;
         let start = Instant::now();
         let mut delay_total: Duration = Duration::ZERO;
         let deadline = start + run_length;
         let start_cpu = cputime::cpu();
         while start.elapsed() < run_length {
-            i += 1;
             let url_entry = urls.recv();
             if url_entry.is_err() {
                 // TODO: start again until time is done.

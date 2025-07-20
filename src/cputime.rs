@@ -1,6 +1,6 @@
 use std::fs::File;
 use std::io::{BufReader, Read, Result};
-use std::ops::{Div, Sub};
+use std::ops::Sub;
 use std::time::{Duration, Instant};
 
 /// Number of cpu ticks per second.

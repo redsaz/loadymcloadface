@@ -1,3 +1,4 @@
+use chrono::{DateTime, FixedOffset};
 use config::{Config, ConfigError, Environment, File};
 use core::result::Result;
 use dotenv::dotenv;
@@ -46,6 +47,9 @@ pub struct Configuration {
     /// Pass a client cert for each request for mTLS, if defined with the path to a pem file that
     /// contains both the cert and key. By default this is undefined.
     pub identity_pem: Option<Identity>,
+    /// The datetime to start running the job, if specified. If not specified or is blank, job
+    /// starts ASAP. Format is ISO 8601, like "2025-06-23T10:00:00Z" or "2023-06-23T06:00:00-0400"
+    pub start_at: Option<DateTime<FixedOffset>>,
     /// How often to report the run's statistics. Defaults to 10 seconds.
     pub stat_period: Duration,
     /// The user agent to send with each request.
@@ -89,6 +93,19 @@ fn time_from_string(time_str: &str) -> Result<Duration, ConfigError> {
         _ => Err(ConfigError::Message(
             "Unknown unit specified for duration.".to_string(),
         )),
+    }
+}
+
+fn datetime_from_string(datetime_str: Option<String>) -> Option<DateTime<FixedOffset>> {
+    if let Some(datetime_str) = datetime_str {
+        if datetime_str.is_empty() {
+            return None;
+        }
+        Some(
+            DateTime::parse_from_rfc3339(datetime_str.as_str()).expect("Failed to parse datetime."),
+        )
+    } else {
+        None
     }
 }
 
@@ -141,6 +158,7 @@ pub fn config() -> Result<Configuration, ConfigError> {
         .set_default("connection", "keep-alive")?
         .set_default("headers", Vec::<String>::new())?
         .set_default("identity_pem", Option::None::<String>)?
+        .set_default("start_at", Option::None::<String>)?
         .set_default("stat_period", "10s")?
         .set_default(
             "user_agent",
@@ -159,6 +177,7 @@ pub fn config() -> Result<Configuration, ConfigError> {
         eprintln!("timeout: {:?}", s.get::<String>("timeout"));
         eprintln!("connection: {:?}", s.get::<String>("connection"));
         eprintln!("headers: {:?}", s.get_array("headers"));
+        eprintln!("start_at: {:?}", s.get::<Option<String>>("start_at"));
         eprintln!(
             "identity_pem: {:?}",
             s.get::<Option<String>>("identity_pem")
@@ -175,6 +194,7 @@ pub fn config() -> Result<Configuration, ConfigError> {
         rate: rate_from_string(&s.get_string("rate").unwrap()).unwrap(),
         node: s.get("node").unwrap(),
         nodes: s.get("nodes").unwrap(),
+        start_at: datetime_from_string(s.get("start_at").unwrap()),
         time: time_from_string(&s.get_string("time").unwrap()).unwrap(),
         timeout: time_from_string(&s.get_string("timeout").unwrap()).unwrap(),
         identity_pem: identity_from_string(s.get("identity_pem").unwrap()),

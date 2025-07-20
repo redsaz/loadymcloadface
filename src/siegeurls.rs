@@ -126,7 +126,7 @@ impl SiegeUrls {
             }
             let mut mode = Mode::Normal;
             let mut var_start = 0; // will be updated later
-            let mut var_name = &line[0..1]; // will be updated later
+            let mut var_name; // will be updated later
             let line = &line[i..];
             for (i, c) in line.chars().enumerate() {
                 match mode {
