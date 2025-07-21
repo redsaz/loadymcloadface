@@ -450,18 +450,23 @@ fn stats(rx: Receiver<()>, counters: Arc<TotalsSet>, stat_period: Duration) {
 
 fn wait_for_start(start_at: Option<DateTime<FixedOffset>>) {
     if let Some(start_at) = start_at {
-        let minutes_away = (start_at - Utc::now().fixed_offset()).num_minutes();
-        if minutes_away > 2 {
+        let seconds_away = (start_at - Utc::now().fixed_offset()).num_seconds();
+        let hours_part = seconds_away / 3600;
+        let seconds_part = seconds_away % 3600;
+        let minutes_part = seconds_part / 60;
+        let seconds_part = seconds_part % 60;
+        if hours_part > 0 {
             eprintln!(
-                "Warning: starting at {} which is {} minutes away.",
-                start_at, minutes_away
+                "Warning: starting at {} in {}h{}m{}s.",
+                start_at, hours_part, minutes_part, seconds_part
             );
-        } else if start_at > Utc::now() {
+        } else if minutes_part > 0 {
             eprintln!(
-                "Starting at {} in {} seconds.",
-                start_at,
-                (start_at - Utc::now().fixed_offset()).num_seconds()
+                "Warning: starting at {} in {}m{}s.",
+                start_at, minutes_part, seconds_part
             );
+        } else if seconds_part > 0 {
+            eprintln!("Warning: starting at {} in {}s.", start_at, seconds_part);
         } else {
             eprintln!(
                 "Scheduled to start at {} (in the past). Will start ASAP.",
