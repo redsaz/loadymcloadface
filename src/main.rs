@@ -1,4 +1,4 @@
-use std::{path::Path, time::Duration};
+use std::{error::Error, time::Duration};
 
 use loadymcloadface::{configuration, cputime, siegeurls::SiegeUrls};
 // use tokio;
@@ -8,9 +8,9 @@ use loadymcloadface::{configuration, cputime, siegeurls::SiegeUrls};
 //     loadymcloadface::asyncy::run_traffic().await;
 // }
 
-fn main() {
+fn main() -> Result<(), Box<dyn Error>> {
     cputime::init();
-    let config = configuration::config().expect("LoadyMcLoadface is misconfigured.");
+    let config = configuration::config()?;
     let logger_env = env_logger::Env::new()
         .filter("LOADY_LOG")
         .write_style("LOADY_LOG_STYLE");
@@ -26,9 +26,7 @@ fn main() {
     if config.debug {
         eprintln!("Call delay is {}ms", call_delay.as_millis());
     }
-    let urls =
-        SiegeUrls::load_iter_looping_buffered(Path::new("urls.txt"), call_delay, stride, offset);
+    let urls = SiegeUrls::load_iter_looping_buffered(&config.urls_file, call_delay, stride, offset);
     loadymcloadface::classicy::run_traffic(config, urls);
-    // this would be nice output maybe?
-    // 0:00:01 1707req/s 1225ms/req 99.0%err 123KB/s:up 123KB/s:dn 21.0cores
+    Ok(())
 }

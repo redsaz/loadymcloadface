@@ -3,8 +3,10 @@ use config::{Config, ConfigError, Environment, File};
 use core::result::Result;
 use dotenv::dotenv;
 use reqwest::{Identity, Url};
+use serde::de::Error;
 use std::env;
 use std::io::Read;
+use std::path::PathBuf;
 use std::time::Duration;
 
 /// Configuration for running a load test.
@@ -54,6 +56,8 @@ pub struct Configuration {
     pub stat_period: Duration,
     /// The user agent to send with each request.
     pub user_agent: String,
+    /// The file to read URLs from
+    pub urls_file: PathBuf,
 }
 
 fn rate_from_string(rate_str: &str) -> Result<f64, ConfigError> {
@@ -160,6 +164,7 @@ pub fn config() -> Result<Configuration, ConfigError> {
         .set_default("identity_pem", Option::None::<String>)?
         .set_default("start_at", Option::None::<String>)?
         .set_default("stat_period", "10s")?
+        .set_default("urls_file", "urls.txt")?
         .set_default(
             "user_agent",
             format!("loadymcloadface/{}", env!("CARGO_PKG_VERSION")),
@@ -178,11 +183,26 @@ pub fn config() -> Result<Configuration, ConfigError> {
         eprintln!("connection: {:?}", s.get::<String>("connection"));
         eprintln!("headers: {:?}", s.get_array("headers"));
         eprintln!("start_at: {:?}", s.get::<Option<String>>("start_at"));
+        eprintln!("stat_period: {:?}", s.get::<String>("stat_rate"));
+        eprintln!("urls_file: {:?}", s.get::<String>("urls_file"));
         eprintln!(
             "identity_pem: {:?}",
             s.get::<Option<String>>("identity_pem")
         );
-        eprintln!("stat_period: {:?}", s.get::<String>("stat_rate"));
+    }
+
+    let urls_file = PathBuf::from(&s.get_string("urls_file").unwrap());
+    // This doesn't prevent time-of-check to time-of-use issue. It's simply to help the user
+    // know what to do.
+    match urls_file.try_exists() {
+        Ok(false) => {
+            return Err(ConfigError::custom(format!(
+                "URLs file {:?} does not exist.",
+                urls_file
+            )))
+        }
+        Err(e) => return Err(ConfigError::custom(e)),
+        _ => (),
     }
 
     Ok(Configuration {
@@ -199,6 +219,7 @@ pub fn config() -> Result<Configuration, ConfigError> {
         timeout: time_from_string(&s.get_string("timeout").unwrap()).unwrap(),
         identity_pem: identity_from_string(s.get("identity_pem").unwrap()),
         stat_period: time_from_string(&s.get_string("stat_period").unwrap()).unwrap(),
+        urls_file: urls_file,
         user_agent: s.get("user_agent").unwrap(),
     })
 }
