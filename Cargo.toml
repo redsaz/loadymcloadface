@@ -7,6 +7,13 @@ edition = "2021"
 name = "loady"
 path = "src/main.rs"
 
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+
 [dependencies]
 # hyper = { version = "1", features = ["full"] }
 tokio = { version = "1", features = ["full"] }
