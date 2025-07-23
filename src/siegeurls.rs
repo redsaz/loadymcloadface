@@ -1,5 +1,6 @@
 use core::panic;
 use crossbeam::channel::{bounded, Receiver};
+use log::debug;
 use reqwest::Method;
 use std::env;
 use std::{
@@ -641,7 +642,7 @@ impl SiegeUrls {
                     added_delay = Duration::ZERO;
 
                     if let Err(_) = tx.send(url_entry) {
-                        eprintln!("Channel disconnected, will not send any more URLs.");
+                        debug!("Channel disconnected, will not send any more URLs.");
                         break;
                     }
                 } else {

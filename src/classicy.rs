@@ -3,7 +3,7 @@ use crate::cputime;
 use crate::siegeurls::{BodyData, UrlEntry};
 use chrono::{DateTime, FixedOffset, Utc};
 use crossbeam::channel::{bounded, Receiver, RecvTimeoutError, Sender};
-use log::debug;
+use log::{debug, log_enabled, Level};
 use reqwest::blocking::Client;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use reqwest::{StatusCode, Url};
@@ -202,7 +202,7 @@ fn traffic_user(
             conn_error_duration.as_millis()
         )
     };
-    eprintln!(
+    debug!(
         "Thread made calls={} (success_total={}) total_bytes={} total_duration_millis={}{}",
         count,
         succeess_count,
@@ -242,7 +242,7 @@ fn logger(rx: Receiver<Sample>, counters: Arc<TotalsSet>) {
         writeln!(log, "{}", entry).unwrap();
     }
     log.flush().unwrap();
-    eprintln!("Logging complete. Received {} entries.", count);
+    debug!("Logging complete. Received {} entries.", count);
 }
 
 fn report_stats(
@@ -445,7 +445,7 @@ fn stats(rx: Receiver<()>, counters: Arc<TotalsSet>, stat_period: Duration) {
             Ok(_) => eprintln!("Unexpected message sent to stats thread. Ignoring."),
         }
     }
-    eprintln!("Stats complete.");
+    debug!("Stats complete.");
 }
 
 fn wait_for_start(start_at: Option<DateTime<FixedOffset>>) {
@@ -457,21 +457,22 @@ fn wait_for_start(start_at: Option<DateTime<FixedOffset>>) {
         let seconds_part = seconds_part % 60;
         if hours_part > 0 {
             eprintln!(
-                "Warning: starting at {} in {}h{}m{}s.",
+                "Starting at {} in {}h{}m{}s.",
                 start_at, hours_part, minutes_part, seconds_part
             );
         } else if minutes_part > 0 {
             eprintln!(
-                "Warning: starting at {} in {}m{}s.",
+                "Starting at {} in {}m{}s.",
                 start_at, minutes_part, seconds_part
             );
         } else if seconds_part > 0 {
-            eprintln!("Warning: starting at {} in {}s.", start_at, seconds_part);
+            eprintln!("Starting at {} in {}s.", start_at, seconds_part);
         } else {
             eprintln!(
-                "Scheduled to start at {} (in the past). Will start ASAP.",
+                "Scheduled to start at {} (in the past). Starting job NOW.",
                 start_at
             );
+            return;
         }
         let ms_away = (start_at - Utc::now().fixed_offset()).num_milliseconds() - 10_000;
         if ms_away > 0 {
@@ -666,13 +667,15 @@ pub fn run_traffic(config: Configuration, urls: Receiver<UrlEntry>) {
             eprintln!("Failed to join logger thread. Error: {:?}", e);
         }
 
-        let diff_cpu = end_cpu - start_cpu;
-        eprintln!(
-            "After {}ms, made {} calls. User: {} System: {}",
-            diff_cpu.elapsed.as_millis(),
-            total,
-            diff_cpu.user.as_millis(),
-            end_cpu.system.as_millis()
-        );
+        if log_enabled!(Level::Debug) {
+            let diff_cpu = end_cpu - start_cpu;
+            debug!(
+                "After {}ms, made {} calls. User: {}ms System: {}ms",
+                diff_cpu.elapsed.as_millis(),
+                total,
+                diff_cpu.user.as_millis(),
+                end_cpu.system.as_millis()
+            );
+        }
     });
 }
