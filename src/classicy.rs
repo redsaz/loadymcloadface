@@ -1,5 +1,5 @@
 use crate::configuration::Configuration;
-use crate::cputime;
+use crate::cputime::{self, ProcPidStats};
 use crate::siegeurls::{BodyData, UrlEntry};
 use chrono::{DateTime, FixedOffset, Utc};
 use crossbeam::channel::{bounded, Receiver, RecvTimeoutError, Sender};
@@ -39,6 +39,31 @@ struct LocalTotals {
     bytes_up: u64,
     bytes_down: u64,
     elapsed: u64,
+    error_count: u64,
+    cpu: ProcPidStats,
+}
+
+impl Totals {
+    fn into_local(&self) -> LocalTotals {
+        LocalTotals {
+            count: self.count.load(Ordering::Relaxed),
+            bytes_up: self.bytes_up.load(Ordering::Relaxed),
+            bytes_down: self.bytes_down.load(Ordering::Relaxed),
+            elapsed: self.elapsed.load(Ordering::Relaxed),
+            error_count: 0,
+            cpu: ProcPidStats {
+                elapsed: Duration::ZERO,
+                user: Duration::ZERO,
+                system: Duration::ZERO,
+            },
+        }
+    }
+}
+
+impl TotalsSet {
+    fn into_local(&self) -> (LocalTotals, LocalTotals) {
+        (self.success.into_local(), self.error.into_local())
+    }
 }
 
 // useful jmeter values:
@@ -307,7 +332,7 @@ fn report_stats(
     if err_perc >= 100f64 {
         // " 100%err"
         print!(" {:4.0}%err", err_perc);
-    } else if err_perc >= 10f64 {
+    } else if err_perc >= 9.995f64 {
         // 99.9%err
         print!(" {:4.1}%err", err_perc);
     } else {
@@ -390,61 +415,75 @@ fn report_stats(
     }
 }
 
+fn compute_stats(
+    job_cpu: &ProcPidStats,
+    iter_counter: LocalTotals,
+    latest_success: &LocalTotals,
+    latest_error: &LocalTotals,
+) -> LocalTotals {
+    let end_cpu = cputime::cpu();
+    let diff_cpu = end_cpu - iter_counter.cpu;
+    let iter_runtime = diff_cpu.elapsed;
+    // If the time since the previous report was too short, skip this one.
+    if iter_runtime.as_millis() < 500 {
+        return iter_counter;
+    }
+
+    let runtime = end_cpu.elapsed - job_cpu.elapsed;
+    let end_error_count = latest_error.count;
+    let end_counter = LocalTotals {
+        count: latest_success.count + end_error_count,
+        bytes_up: latest_success.bytes_up + latest_error.bytes_up,
+        bytes_down: latest_success.bytes_down + latest_error.bytes_down,
+        elapsed: latest_success.elapsed + latest_error.elapsed,
+        error_count: end_error_count,
+        cpu: end_cpu,
+    };
+    let num_calls = end_counter.count - iter_counter.count;
+    let num_errs = end_counter.error_count - iter_counter.error_count;
+    let calls_ms_total = end_counter.elapsed - iter_counter.elapsed;
+    let bytes_up = end_counter.bytes_up - iter_counter.bytes_up;
+    let bytes_down = end_counter.bytes_down - iter_counter.bytes_down;
+    // let mem = memory_stats::memory_stats().unwrap();
+    report_stats(
+        runtime,
+        iter_runtime,
+        calls_ms_total,
+        num_calls,
+        num_errs,
+        bytes_up,
+        bytes_down,
+        diff_cpu.cpu_cores(),
+    );
+    end_counter
+}
+
 fn stats(rx: Receiver<()>, counters: Arc<TotalsSet>, stat_period: Duration) {
     let job_cpu = cputime::cpu();
-    let mut iter_cpu = job_cpu.clone();
     // Combine error and success totals for display
     let mut iter_counter = LocalTotals {
         bytes_up: 0,
         bytes_down: 0,
         count: 0,
         elapsed: 0,
+        error_count: 0,
+        cpu: job_cpu.clone(),
     };
-    let mut iter_error_count = 0u64;
     loop {
         match rx.recv_timeout(stat_period) {
             Err(RecvTimeoutError::Timeout) => {
-                let end_cpu = cputime::cpu();
-                let diff_cpu = end_cpu - iter_cpu;
-                let iter_runtime = diff_cpu.elapsed;
-                iter_cpu = end_cpu;
-                let runtime = end_cpu.elapsed - job_cpu.elapsed;
-                let end_error_count = counters.error.count.load(Ordering::Relaxed);
-                let end_counter = LocalTotals {
-                    count: counters.success.count.load(Ordering::Relaxed) + end_error_count,
-                    bytes_up: counters.success.bytes_up.load(Ordering::Relaxed)
-                        + counters.error.bytes_up.load(Ordering::Relaxed),
-                    bytes_down: counters.success.bytes_down.load(Ordering::Relaxed)
-                        + counters.error.bytes_down.load(Ordering::Relaxed),
-                    elapsed: counters.success.elapsed.load(Ordering::Relaxed)
-                        + counters.error.elapsed.load(Ordering::Relaxed),
-                };
-                let num_calls = end_counter.count - iter_counter.count;
-                let num_errs = end_error_count - iter_error_count;
-                let calls_ms_total = end_counter.elapsed - iter_counter.elapsed;
-                let bytes_up = end_counter.bytes_up - iter_counter.bytes_up;
-                let bytes_down = end_counter.bytes_down - iter_counter.bytes_down;
-                iter_counter = end_counter;
-                iter_error_count = end_error_count;
-                // let mem = memory_stats::memory_stats().unwrap();
-                report_stats(
-                    runtime,
-                    iter_runtime,
-                    calls_ms_total,
-                    num_calls,
-                    num_errs,
-                    bytes_up,
-                    bytes_down,
-                    diff_cpu.cpu_cores(),
-                );
+                let (success, error) = counters.into_local();
+                iter_counter = compute_stats(&job_cpu, iter_counter, &success, &error);
             }
             Err(_) => {
-                eprintln!("Shutting down. Pretend overall stats are printed here.");
+                let (success, error) = counters.into_local();
+                compute_stats(&job_cpu, iter_counter, &success, &error);
                 break;
             }
             Ok(_) => eprintln!("Unexpected message sent to stats thread. Ignoring."),
         }
     }
+    eprintln!("Run completed. Pretend overall stats are printed here.");
     debug!("Stats complete.");
 }
 
@@ -632,6 +671,7 @@ pub fn run_traffic(config: Configuration, urls: Receiver<UrlEntry>) {
 
             tx.send_deadline(url_entry, deadline).unwrap_or_default();
         }
+        eprintln!("Shutting down. Waiting for active requests to finish.");
         debug!("Shutting down threads.");
         // Signal to all traffic generator threads to shutdown
         for _ in 0..num_threads {
