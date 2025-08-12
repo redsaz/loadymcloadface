@@ -24,7 +24,9 @@ struct CallResult {
 
 struct TotalsSet {
     success: Totals,
-    error: Totals,
+    client_fail: Totals,
+    server_fail: Totals,
+    conn_error: Totals,
 }
 
 struct Totals {
@@ -61,8 +63,13 @@ impl Totals {
 }
 
 impl TotalsSet {
-    fn into_local(&self) -> (LocalTotals, LocalTotals) {
-        (self.success.into_local(), self.error.into_local())
+    fn into_local(&self) -> (LocalTotals, LocalTotals, LocalTotals, LocalTotals) {
+        (
+            self.success.into_local(),
+            self.client_fail.into_local(),
+            self.server_fail.into_local(),
+            self.conn_error.into_local(),
+        )
     }
 }
 
@@ -249,11 +256,15 @@ fn logger(rx: Receiver<Sample>, counters: Arc<TotalsSet>) {
             // between that receiver and the "main" receiver, but this'll do)
             break;
         }
-        let totals = match entry.success {
-            true => &counters.success,
-            false => &counters.error,
+        let totals = if entry.response_code.starts_with("4") {
+            &counters.client_fail
+        } else if entry.response_code.starts_with("5") {
+            &counters.server_fail
+        } else if entry.response_code == "conn_error" {
+            &counters.conn_error
+        } else {
+            &counters.success
         };
-
         totals.count.fetch_add(1, Ordering::Relaxed);
         totals
             .elapsed
@@ -419,7 +430,9 @@ fn compute_stats(
     job_cpu: &ProcPidStats,
     iter_counter: LocalTotals,
     latest_success: &LocalTotals,
-    latest_error: &LocalTotals,
+    latest_client_fail: &LocalTotals,
+    latest_server_fail: &LocalTotals,
+    latest_conn_error: &LocalTotals,
 ) -> LocalTotals {
     let end_cpu = cputime::cpu();
     let diff_cpu = end_cpu - iter_counter.cpu;
@@ -430,12 +443,22 @@ fn compute_stats(
     }
 
     let runtime = end_cpu.elapsed - job_cpu.elapsed;
-    let end_error_count = latest_error.count;
+    let end_error_count =
+        latest_client_fail.count + latest_server_fail.count + latest_conn_error.count;
     let end_counter = LocalTotals {
         count: latest_success.count + end_error_count,
-        bytes_up: latest_success.bytes_up + latest_error.bytes_up,
-        bytes_down: latest_success.bytes_down + latest_error.bytes_down,
-        elapsed: latest_success.elapsed + latest_error.elapsed,
+        bytes_up: latest_success.bytes_up
+            + latest_client_fail.bytes_up
+            + latest_server_fail.bytes_up
+            + latest_conn_error.bytes_up,
+        bytes_down: latest_success.bytes_down
+            + latest_client_fail.bytes_down
+            + latest_server_fail.bytes_down
+            + latest_conn_error.bytes_down,
+        elapsed: latest_success.elapsed
+            + latest_client_fail.elapsed
+            + latest_server_fail.elapsed
+            + latest_conn_error.elapsed,
         error_count: end_error_count,
         cpu: end_cpu,
     };
@@ -472,18 +495,128 @@ fn stats(rx: Receiver<()>, counters: Arc<TotalsSet>, stat_period: Duration) {
     loop {
         match rx.recv_timeout(stat_period) {
             Err(RecvTimeoutError::Timeout) => {
-                let (success, error) = counters.into_local();
-                iter_counter = compute_stats(&job_cpu, iter_counter, &success, &error);
+                let (success, client_fail, server_fail, conn_error) = counters.into_local();
+                iter_counter = compute_stats(
+                    &job_cpu,
+                    iter_counter,
+                    &success,
+                    &client_fail,
+                    &server_fail,
+                    &conn_error,
+                );
             }
             Err(_) => {
-                let (success, error) = counters.into_local();
-                compute_stats(&job_cpu, iter_counter, &success, &error);
+                let (success, client_fail, server_fail, conn_error) = counters.into_local();
+                compute_stats(
+                    &job_cpu,
+                    iter_counter,
+                    &success,
+                    &client_fail,
+                    &server_fail,
+                    &conn_error,
+                );
                 break;
             }
             Ok(_) => eprintln!("Unexpected message sent to stats thread. Ignoring."),
         }
     }
-    eprintln!("Run completed. Pretend overall stats are printed here.");
+    let end_cpu = cputime::cpu();
+    let total_cpu = end_cpu - job_cpu;
+    let total_runtime_sec = total_cpu.elapsed.as_secs_f64();
+    let (success, client_fail, server_fail, conn_error) = counters.into_local();
+
+    fn byte_format(bytes: u64) -> String {
+        if bytes < 100_000 {
+            format!("{:>8}     bytes", bytes)
+        } else if bytes < 100_000_000 {
+            format!("{:>12.3} KB", bytes as f64 / 1000f64)
+        } else if bytes < 100_000_000_000 {
+            format!("{:>12.3} MB", bytes as f64 / 1_000_000f64)
+        } else if bytes < 100_000_000_000_000 {
+            format!("{:>12.3} GB", bytes as f64 / 1_000_000_000f64)
+        } else {
+            format!("{:>12.3} TB", bytes as f64 / 1_000_000_000_000f64)
+        }
+    }
+
+    fn byte_format_f64(bytes: f64) -> String {
+        if bytes < 100_000f64 {
+            format!("{:>12.3} bytes", bytes)
+        } else if bytes < 100_000_000f64 {
+            format!("{:>12.3} KB", bytes as f64 / 1000f64)
+        } else if bytes < 100_000_000_000f64 {
+            format!("{:>12.3} MB", bytes as f64 / 1_000_000f64)
+        } else if bytes < 100_000_000_000_000f64 {
+            format!("{:>12.3} GB", bytes as f64 / 1_000_000_000f64)
+        } else {
+            format!("{:>12.3} TB", bytes as f64 / 1_000_000_000_000f64)
+        }
+    }
+
+    // TODO: compute_stats should not output LocalTotals. It should be something that supports the below.
+    println!("Results:");
+    println!("Elapsed time:            {:>12.3} s", total_runtime_sec);
+    let total_requests = success.count + client_fail.count + server_fail.count + conn_error.count;
+    println!("Total requests:          {:>8}", total_requests);
+    println!(
+        "Total good requests:     {:>8}     ({:>5.1}%)",
+        success.count,
+        success.count as f64 / total_requests as f64 * 100f64
+    );
+    println!(
+        "Total 4xx requests:      {:>8}     ({:>5.1}%)",
+        client_fail.count,
+        client_fail.count as f64 / total_requests as f64 * 100f64
+    );
+    println!(
+        "Total 5xx requests:      {:>8}     ({:>5.1}%)",
+        server_fail.count,
+        server_fail.count as f64 / total_requests as f64 * 100f64
+    );
+    println!(
+        "Total connection errors: {:>8}     ({:>5.1}%)",
+        conn_error.count,
+        conn_error.count as f64 / total_requests as f64 * 100f64
+    );
+    let total_request_sec =
+        (success.elapsed + client_fail.elapsed + server_fail.elapsed + conn_error.elapsed) as f64
+            / 1000f64;
+    println!(
+        "Total request time:      {:>12.3} seconds",
+        total_request_sec
+    );
+    let total_data_up =
+        success.bytes_up + client_fail.bytes_up + server_fail.bytes_up + conn_error.bytes_up;
+    println!("Total data uploaded:     {}", byte_format(total_data_up));
+    let total_data_down = success.bytes_down
+        + client_fail.bytes_down
+        + server_fail.bytes_down
+        + conn_error.bytes_down;
+    println!("Total data downloaded:   {}", byte_format(total_data_down));
+    println!(
+        "Request rate:            {:>12.3} req/sec",
+        total_requests as f64 / total_runtime_sec
+    );
+    println!(
+        "Upload rate:             {}/sec",
+        byte_format_f64(total_data_up as f64 / total_runtime_sec)
+    );
+    println!(
+        "Download rate:           {}/sec",
+        byte_format_f64(total_data_down as f64 / total_runtime_sec)
+    );
+    println!(
+        "Request concurrency:     {:>12.3}",
+        total_request_sec / total_runtime_sec
+    );
+    println!(
+        "Avg request time:        {:>12.3} ms",
+        total_request_sec * 1000f64 / total_requests as f64
+    );
+    println!(
+        "CPU used                 {:>12.3} cores",
+        (total_cpu.system + total_cpu.user).div_duration_f64(total_cpu.elapsed)
+    );
     debug!("Stats complete.");
 }
 
@@ -583,7 +716,19 @@ pub fn run_traffic(config: Configuration, urls: Receiver<UrlEntry>) {
                 bytes_down: AtomicU64::new(0),
                 elapsed: AtomicU64::new(0),
             },
-            error: Totals {
+            client_fail: Totals {
+                count: AtomicU64::new(0),
+                bytes_up: AtomicU64::new(0),
+                bytes_down: AtomicU64::new(0),
+                elapsed: AtomicU64::new(0),
+            },
+            server_fail: Totals {
+                count: AtomicU64::new(0),
+                bytes_up: AtomicU64::new(0),
+                bytes_down: AtomicU64::new(0),
+                elapsed: AtomicU64::new(0),
+            },
+            conn_error: Totals {
                 count: AtomicU64::new(0),
                 bytes_up: AtomicU64::new(0),
                 bytes_down: AtomicU64::new(0),
