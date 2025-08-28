@@ -743,8 +743,16 @@ pub fn run_traffic(config: Configuration, urls: Receiver<UrlEntry>) {
             builder = builder.timeout(None);
         }
         if config.identity_pem.is_some() {
-            builder = builder.identity(config.identity_pem.unwrap());
+            builder = builder
+                .use_rustls_tls()
+                .identity(config.identity_pem.unwrap());
         }
+        if config.insecure {
+            builder = builder
+                .danger_accept_invalid_certs(true)
+                .danger_accept_invalid_hostnames(true);
+        }
+
         if !config.connection.eq_ignore_ascii_case("keep-alive") {
             builder = builder.pool_max_idle_per_host(0);
         }

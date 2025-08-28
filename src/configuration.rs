@@ -49,6 +49,9 @@ pub struct Configuration {
     /// Pass a client cert for each request for mTLS, if defined with the path to a pem file that
     /// contains both the cert and key. By default this is undefined.
     pub identity_pem: Option<Identity>,
+    /// If true, then the TLS connection is insecure: no checking of the hostname or the validity
+    /// of the cert will be done. By default this is false.
+    pub insecure: bool,
     /// The datetime to start running the job, if specified. If not specified or is blank, job
     /// starts ASAP. Format is ISO 8601, like "2025-06-23T10:00:00Z" or "2023-06-23T06:00:00-0400"
     pub start_at: Option<DateTime<FixedOffset>>,
@@ -113,7 +116,7 @@ fn datetime_from_string(datetime_str: Option<String>) -> Option<DateTime<FixedOf
     }
 }
 
-fn identity_from_string(pem_file_str: Option<&str>) -> Option<Identity> {
+fn identity_from_string(pem_file_str: Option<String>) -> Option<Identity> {
     if pem_file_str.is_none() {
         return Option::None;
     }
@@ -162,6 +165,7 @@ pub fn config() -> Result<Configuration, ConfigError> {
         .set_default("connection", "keep-alive")?
         .set_default("headers", Vec::<String>::new())?
         .set_default("identity_pem", Option::None::<String>)?
+        .set_default("insecure", "false")?
         .set_default("start_at", Option::None::<String>)?
         .set_default("stat_period", "10s")?
         .set_default("urls_file", "urls.txt")?
@@ -180,6 +184,8 @@ pub fn config() -> Result<Configuration, ConfigError> {
         eprintln!("nodes: {:?}", s.get_int("nodes"));
         eprintln!("time: {:?}", s.get::<String>("time"));
         eprintln!("timeout: {:?}", s.get::<String>("timeout"));
+        eprintln!("identity_pem: {:?}", s.get::<String>("identity_pem"));
+        eprintln!("insecure: {:?}", s.get_bool("insecure"));
         eprintln!("connection: {:?}", s.get::<String>("connection"));
         eprintln!("headers: {:?}", s.get_array("headers"));
         eprintln!("start_at: {:?}", s.get::<Option<String>>("start_at"));
@@ -218,6 +224,7 @@ pub fn config() -> Result<Configuration, ConfigError> {
         time: time_from_string(&s.get_string("time").unwrap()).unwrap(),
         timeout: time_from_string(&s.get_string("timeout").unwrap()).unwrap(),
         identity_pem: identity_from_string(s.get("identity_pem").unwrap()),
+        insecure: s.get("insecure").unwrap(),
         stat_period: time_from_string(&s.get_string("stat_period").unwrap()).unwrap(),
         urls_file: urls_file,
         user_agent: s.get("user_agent").unwrap(),
