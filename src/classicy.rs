@@ -3,6 +3,7 @@ use crate::cputime::{self, ProcPidStats};
 use crate::siegeurls::{BodyData, UrlEntry};
 use chrono::{DateTime, FixedOffset, Utc};
 use crossbeam::channel::{bounded, Receiver, RecvTimeoutError, Sender};
+use crossbeam::select;
 use log::{debug, log_enabled, Level};
 use reqwest::blocking::Client;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
@@ -13,7 +14,7 @@ use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::thread::{scope, sleep};
+use std::thread::scope;
 use std::time::{Duration, Instant};
 
 struct CallResult {
@@ -620,7 +621,7 @@ fn stats(rx: Receiver<()>, counters: Arc<TotalsSet>, stat_period: Duration) {
     debug!("Stats complete.");
 }
 
-fn wait_for_start(start_at: Option<DateTime<FixedOffset>>) {
+fn wait_for_start(start_at: Option<DateTime<FixedOffset>>, cancel_rx: &Receiver<()>) {
     if let Some(start_at) = start_at {
         let seconds_away = (start_at - Utc::now().fixed_offset()).num_seconds();
         let hours_part = seconds_away / 3600;
@@ -647,16 +648,18 @@ fn wait_for_start(start_at: Option<DateTime<FixedOffset>>) {
             return;
         }
         let ms_away = (start_at - Utc::now().fixed_offset()).num_milliseconds() - 10_000;
+        let mut cancel = false;
         if ms_away > 0 {
             let ms_delay = Duration::from_millis(ms_away as u64);
-            sleep(ms_delay);
+            // If, while waiting, ctrl+c is pressed, then just start running the job.
+            cancel = cancel_rx.recv_timeout(ms_delay).is_ok();
         }
         loop {
             let ms_away = (start_at - Utc::now().fixed_offset()).num_milliseconds();
-            if ms_away > 0 {
+            if ms_away > 0 && !cancel {
                 eprint!("{}...", f64::round(ms_away as f64 / 1000 as f64));
                 let ms_delay = Duration::from_millis(min(ms_away as u64, 1000));
-                sleep(ms_delay);
+                cancel = cancel_rx.recv_timeout(ms_delay).is_ok();
             } else {
                 eprintln!();
                 break;
@@ -709,6 +712,7 @@ pub fn run_traffic(config: Configuration, urls: Receiver<UrlEntry>) {
         let (tx, rx) = bounded(1);
         let (result_tx, result_rx) = bounded(1000);
         let (stat_tx, stat_rx) = bounded(0);
+        let (cancel_tx, cancel_rx) = bounded(0);
         let counters = Arc::new(TotalsSet {
             success: Totals {
                 count: AtomicU64::new(0),
@@ -785,9 +789,11 @@ pub fn run_traffic(config: Configuration, urls: Receiver<UrlEntry>) {
         // Spin up logger outputter
         let counters_a = counters.clone();
         let logger_thread = scope.spawn(|| logger(result_rx, counters_a));
+        ctrlc::set_handler(move || cancel_tx.send(()).expect("Unable to send cancel signal."))
+            .expect("Could not set up Ctrl-C handler.");
 
         // If job must start at a specifc time, wait until then.
-        wait_for_start(config.start_at);
+        wait_for_start(config.start_at, &cancel_rx);
 
         // Spin up cpu and mem stats outputter
         let counters_b = counters.clone();
@@ -798,31 +804,44 @@ pub fn run_traffic(config: Configuration, urls: Receiver<UrlEntry>) {
         let mut delay_total: Duration = Duration::ZERO;
         let deadline = start + run_length;
         let start_cpu = cputime::cpu();
-        while start.elapsed() < run_length {
-            let url_entry = urls.recv();
-            if url_entry.is_err() {
-                // TODO: start again until time is done.
-                eprintln!("Reached the end of the urls list before the time limit was reached.");
-                break;
-            }
-            let url_entry = url_entry.ok();
+        let mut cancel = false;
+        while start.elapsed() < run_length && !cancel {
+            select! {
+                recv(urls) -> url_entry => {
+                    if url_entry.is_err() {
+                        // TODO: start again until time is done.
+                        eprintln!("Reached the end of the urls list before the time limit was reached.");
+                        break;
+                    }
+                    let url_entry = url_entry.ok();
 
-            // I'm sure time will show that this is not ideal: delay is calculated by summing up
-            // the total expected delay thus far, find the difference compared to the elapsed
-            // time, and if greater than 0, sleep.
-            // The expected problem is that if a network hiccup occurs, it *could* cause a ton of
-            // calls to "bunch up" after the hiccup completes, sending a swarm ASAP until delay
-            // catches up again.
-            let call_delay = url_entry.as_ref().unwrap().delay;
-            delay_total += call_delay.clone();
-            let delay = delay_total
-                .checked_sub(start.elapsed())
-                .unwrap_or(Duration::ZERO);
-            if delay > Duration::ZERO {
-                sleep(delay);
-            }
+                    // I'm sure time will show that this is not ideal: delay is calculated by summing up
+                    // the total expected delay thus far, find the difference compared to the elapsed
+                    // time, and if greater than 0, sleep.
+                    // The expected problem is that if a network hiccup occurs, it *could* cause a ton of
+                    // calls to "bunch up" after the hiccup completes, sending a swarm ASAP until delay
+                    // catches up again.
+                    let call_delay = url_entry.as_ref().unwrap().delay;
+                    delay_total += call_delay.clone();
+                    let delay = delay_total
+                        .checked_sub(start.elapsed())
+                        .unwrap_or(Duration::ZERO);
+                    if delay > Duration::ZERO {
+                        // If a cancel signal is received while waiting, then stop waiting
+                        // and start the canceling process.
+                        cancel = cancel_rx.recv_timeout(delay).is_ok();
+                    }
 
-            tx.send_deadline(url_entry, deadline).unwrap_or_default();
+                    // Send the request (if we're not canceling the operation)
+                    if !cancel {
+                        tx.send_deadline(url_entry, deadline).unwrap_or_default();
+                    }
+                },
+                recv(cancel_rx) -> _ => {
+                    eprintln!("Received request to quit early.");
+                    cancel = true;
+                },
+            }
         }
         eprintln!("Shutting down. Waiting for active requests to finish.");
         debug!("Shutting down threads.");
