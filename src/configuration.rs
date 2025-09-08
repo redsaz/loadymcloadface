@@ -19,11 +19,12 @@ pub struct Configuration {
     /// Whether to have a connection keep-alive or close after every http transaction.
     /// keep-alive will use connection pools, and add a "Connection: keep-alive" header.
     /// close will turn off connection pools, and adds a "Connection: close" header.
+    /// By default, the connection is close.
     pub connection: String,
     /// A list of headers that are provided for each request.
     pub headers: Vec<String>,
     /// The maximum number of threads (simultaneous users) that will run. If 0, native number of
-    /// cores is used.
+    /// cores is used. Default is 10.
     pub threads: usize,
     /// The target traffic rate to simulate. Can be specified in calls per second, minute, or
     /// hour with the suffixes "/s", "/m", or "/h" respectively. Example: "10/s" will target 10
@@ -156,13 +157,13 @@ pub fn config() -> Result<Configuration, ConfigError> {
         )
         .set_default("debug", "false")?
         .set_default("baseurl", "http://localhost/")?
-        .set_default("threads", 0)?
+        .set_default("threads", 10)?
         .set_default("rate", "1s")?
         .set_default("node", 1)?
         .set_default("nodes", 1)?
         .set_default("time", "1m")?
         .set_default("timeout", "30")?
-        .set_default("connection", "keep-alive")?
+        .set_default("connection", "close")?
         .set_default("headers", Vec::<String>::new())?
         .set_default("identity_pem", Option::None::<String>)?
         .set_default("insecure", "false")?

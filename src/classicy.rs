@@ -1,7 +1,7 @@
 use crate::configuration::Configuration;
 use crate::cputime::{self, ProcPidStats};
 use crate::siegeurls::{BodyData, UrlEntry};
-use chrono::{DateTime, FixedOffset, Utc};
+use chrono::{DateTime, FixedOffset, SecondsFormat, Utc};
 use crossbeam::channel::{bounded, Receiver, RecvTimeoutError, Sender};
 use crossbeam::select;
 use log::{debug, log_enabled, Level};
@@ -283,6 +283,7 @@ fn logger(rx: Receiver<Sample>, counters: Arc<TotalsSet>) {
 }
 
 fn report_stats(
+    report_dt: DateTime<Utc>,
     job_elapsed: Duration,
     iter_elapsed: Duration,
     iter_req_ms_total: u64,
@@ -293,11 +294,17 @@ fn report_stats(
     iter_cores: f32,
 ) {
     // Example:
-    // 0:00:01 1707req/s 1225ms/req 99.0%err 123KB/s:up 123KB/s:dn 21.0cores
+    // 2025-09-08T06:18:01Z 0:00:01 1707req/s 1225ms/req 99.0%err 123KB/s:up 123KB/s:dn 21.0cores
 
-    // elapsed job time
+    // Datetime and elapsed job time
     let (h, m, s) = cputime::duration_hms(job_elapsed);
-    print!("{}:{:02}:{:02}", h, m, s);
+    print!(
+        "{} {}:{:02}:{:02}",
+        report_dt.to_rfc3339_opts(SecondsFormat::Secs, true),
+        h,
+        m,
+        s
+    );
 
     let iter_ms = iter_elapsed.as_millis() as u64;
 
@@ -435,6 +442,7 @@ fn compute_stats(
     latest_server_fail: &LocalTotals,
     latest_conn_error: &LocalTotals,
 ) -> LocalTotals {
+    let now = Utc::now();
     let end_cpu = cputime::cpu();
     let diff_cpu = end_cpu - iter_counter.cpu;
     let iter_runtime = diff_cpu.elapsed;
@@ -470,6 +478,7 @@ fn compute_stats(
     let bytes_down = end_counter.bytes_down - iter_counter.bytes_down;
     // let mem = memory_stats::memory_stats().unwrap();
     report_stats(
+        now,
         runtime,
         iter_runtime,
         calls_ms_total,
@@ -483,6 +492,7 @@ fn compute_stats(
 }
 
 fn stats(rx: Receiver<()>, counters: Arc<TotalsSet>, stat_period: Duration) {
+    let start_dt = Utc::now();
     let job_cpu = cputime::cpu();
     // Combine error and success totals for display
     let mut iter_counter = LocalTotals {
@@ -522,6 +532,7 @@ fn stats(rx: Receiver<()>, counters: Arc<TotalsSet>, stat_period: Duration) {
         }
     }
     let end_cpu = cputime::cpu();
+    let end_dt = Utc::now();
     let total_cpu = end_cpu - job_cpu;
     let total_runtime_sec = total_cpu.elapsed.as_secs_f64();
     let (success, client_fail, server_fail, conn_error) = counters.into_local();
@@ -556,6 +567,14 @@ fn stats(rx: Receiver<()>, counters: Arc<TotalsSet>, stat_period: Duration) {
 
     // TODO: compute_stats should not output LocalTotals. It should be something that supports the below.
     println!("Results:");
+    println!(
+        "Started:               {}",
+        start_dt.to_rfc3339_opts(SecondsFormat::Secs, true)
+    );
+    println!(
+        "Finished:              {}",
+        end_dt.to_rfc3339_opts(SecondsFormat::Secs, true)
+    );
     println!("Elapsed time:            {:>12.3} s", total_runtime_sec);
     let total_requests = success.count + client_fail.count + server_fail.count + conn_error.count;
     println!("Total requests:          {:>8}", total_requests);
