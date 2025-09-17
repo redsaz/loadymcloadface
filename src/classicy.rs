@@ -2,18 +2,17 @@ use crate::configuration::Configuration;
 use crate::cputime::{self, ProcPidStats};
 use crate::siegeurls::{BodyData, UrlEntry};
 use chrono::{DateTime, FixedOffset, SecondsFormat, Utc};
-use crossbeam::channel::{bounded, Receiver, RecvTimeoutError, Sender};
+use crossbeam::channel::{bounded, select_biased, tick, Receiver, Sender};
 use crossbeam::select;
 use log::{debug, log_enabled, Level};
 use reqwest::blocking::Client;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use reqwest::{StatusCode, Url};
 use std::cmp::min;
+use std::error::Error;
 use std::fmt;
 use std::fs::File;
 use std::io::{BufWriter, Write};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
 use std::thread::scope;
 use std::time::{Duration, Instant};
 
@@ -31,47 +30,12 @@ struct TotalsSet {
 }
 
 struct Totals {
-    count: AtomicU64,
-    bytes_up: AtomicU64,
-    bytes_down: AtomicU64,
-    elapsed: AtomicU64,
-}
-
-struct LocalTotals {
     count: u64,
     bytes_up: u64,
     bytes_down: u64,
     elapsed: u64,
     error_count: u64,
     cpu: ProcPidStats,
-}
-
-impl Totals {
-    fn into_local(&self) -> LocalTotals {
-        LocalTotals {
-            count: self.count.load(Ordering::Relaxed),
-            bytes_up: self.bytes_up.load(Ordering::Relaxed),
-            bytes_down: self.bytes_down.load(Ordering::Relaxed),
-            elapsed: self.elapsed.load(Ordering::Relaxed),
-            error_count: 0,
-            cpu: ProcPidStats {
-                elapsed: Duration::ZERO,
-                user: Duration::ZERO,
-                system: Duration::ZERO,
-            },
-        }
-    }
-}
-
-impl TotalsSet {
-    fn into_local(&self) -> (LocalTotals, LocalTotals, LocalTotals, LocalTotals) {
-        (
-            self.success.into_local(),
-            self.client_fail.into_local(),
-            self.server_fail.into_local(),
-            self.conn_error.into_local(),
-        )
-    }
 }
 
 // useful jmeter values:
@@ -153,6 +117,30 @@ fn hit_target(
     })
 }
 
+fn get_error_short(e: Box<dyn Error>) -> String {
+    let mut e = e
+        .downcast_ref::<reqwest::Error>()
+        .and_then(|e1| e1.source());
+    let mut e_candidate = e;
+    loop {
+        if e_candidate.is_none() {
+            break;
+        }
+        e = e_candidate;
+        e_candidate = e.and_then(|e1| e1.source());
+    }
+    match e {
+        Some(e) => {
+            let e1 = e.downcast_ref::<std::io::Error>();
+            match e1 {
+                Some(e1) => e1.kind().to_string(),
+                None => e.to_string(),
+            }
+        }
+        None => "conn_error".to_string(),
+    }
+}
+
 fn traffic_user(
     baseurl: Url,
     base_headers: Vec<String>,
@@ -203,7 +191,9 @@ fn traffic_user(
                     threads,
                 }
             }
-            Result::Err(_) => {
+            Result::Err(e) => {
+                let kind = get_error_short(e);
+                eprintln!("{:?}", kind);
                 conn_error_count += 1;
                 conn_error_duration += start.elapsed();
                 let elapsed = start.elapsed();
@@ -246,7 +236,7 @@ fn traffic_user(
     count
 }
 
-fn logger(rx: Receiver<Sample>, counters: Arc<TotalsSet>) {
+fn logger(rx: Receiver<Sample>, stats_tx: Sender<Sample>) {
     let mut log = BufWriter::new(File::create("results.log").unwrap());
     let mut count = 0;
     loop {
@@ -257,26 +247,8 @@ fn logger(rx: Receiver<Sample>, counters: Arc<TotalsSet>) {
             // between that receiver and the "main" receiver, but this'll do)
             break;
         }
-        let totals = if entry.response_code.starts_with("4") {
-            &counters.client_fail
-        } else if entry.response_code.starts_with("5") {
-            &counters.server_fail
-        } else if entry.response_code == "conn_error" {
-            &counters.conn_error
-        } else {
-            &counters.success
-        };
-        totals.count.fetch_add(1, Ordering::Relaxed);
-        totals
-            .elapsed
-            .fetch_add(entry.elapsed.as_millis() as u64, Ordering::Relaxed);
-        totals.bytes_up.fetch_add(entry.bytes_up, Ordering::Relaxed);
-        totals
-            .bytes_down
-            .fetch_add(entry.bytes_down, Ordering::Relaxed);
-
         count += 1;
-        writeln!(log, "{}", entry).unwrap();
+        let _ = stats_tx.send(entry);
     }
     log.flush().unwrap();
     debug!("Logging complete. Received {} entries.", count);
@@ -436,12 +408,12 @@ fn report_stats(
 
 fn compute_stats(
     job_cpu: &ProcPidStats,
-    iter_counter: LocalTotals,
-    latest_success: &LocalTotals,
-    latest_client_fail: &LocalTotals,
-    latest_server_fail: &LocalTotals,
-    latest_conn_error: &LocalTotals,
-) -> LocalTotals {
+    iter_counter: Totals,
+    latest_success: &Totals,
+    latest_client_fail: &Totals,
+    latest_server_fail: &Totals,
+    latest_conn_error: &Totals,
+) -> Totals {
     let now = Utc::now();
     let end_cpu = cputime::cpu();
     let diff_cpu = end_cpu - iter_counter.cpu;
@@ -454,7 +426,7 @@ fn compute_stats(
     let runtime = end_cpu.elapsed - job_cpu.elapsed;
     let end_error_count =
         latest_client_fail.count + latest_server_fail.count + latest_conn_error.count;
-    let end_counter = LocalTotals {
+    let end_counter = Totals {
         count: latest_success.count + end_error_count,
         bytes_up: latest_success.bytes_up
             + latest_client_fail.bytes_up
@@ -491,11 +463,61 @@ fn compute_stats(
     end_counter
 }
 
-fn stats(rx: Receiver<()>, counters: Arc<TotalsSet>, stat_period: Duration) {
+fn stats(liveness_rx: Receiver<()>, sample_rx: Receiver<Sample>, stat_period: Duration) {
     let start_dt = Utc::now();
     let job_cpu = cputime::cpu();
+    let mut counters = TotalsSet {
+        success: Totals {
+            count: 0,
+            bytes_up: 0,
+            bytes_down: 0,
+            elapsed: 0,
+            cpu: ProcPidStats {
+                elapsed: Duration::ZERO,
+                user: Duration::ZERO,
+                system: Duration::ZERO,
+            },
+            error_count: 0,
+        },
+        client_fail: Totals {
+            count: 0,
+            bytes_up: 0,
+            bytes_down: 0,
+            elapsed: 0,
+            cpu: ProcPidStats {
+                elapsed: Duration::ZERO,
+                user: Duration::ZERO,
+                system: Duration::ZERO,
+            },
+            error_count: 0,
+        },
+        server_fail: Totals {
+            count: 0,
+            bytes_up: 0,
+            bytes_down: 0,
+            elapsed: 0,
+            cpu: ProcPidStats {
+                elapsed: Duration::ZERO,
+                user: Duration::ZERO,
+                system: Duration::ZERO,
+            },
+            error_count: 0,
+        },
+        conn_error: Totals {
+            count: 0,
+            bytes_up: 0,
+            bytes_down: 0,
+            elapsed: 0,
+            cpu: ProcPidStats {
+                elapsed: Duration::ZERO,
+                user: Duration::ZERO,
+                system: Duration::ZERO,
+            },
+            error_count: 0,
+        },
+    };
     // Combine error and success totals for display
-    let mut iter_counter = LocalTotals {
+    let mut iter_counter = Totals {
         bytes_up: 0,
         bytes_down: 0,
         count: 0,
@@ -503,39 +525,61 @@ fn stats(rx: Receiver<()>, counters: Arc<TotalsSet>, stat_period: Duration) {
         error_count: 0,
         cpu: job_cpu.clone(),
     };
+
+    let ticker = tick(stat_period);
+
     loop {
-        match rx.recv_timeout(stat_period) {
-            Err(RecvTimeoutError::Timeout) => {
-                let (success, client_fail, server_fail, conn_error) = counters.into_local();
+        select_biased! {
+            recv(ticker) -> _ => {
+                // Report stats periodically as the job runs.
                 iter_counter = compute_stats(
                     &job_cpu,
                     iter_counter,
-                    &success,
-                    &client_fail,
-                    &server_fail,
-                    &conn_error,
+                    &counters.success,
+                    &counters.client_fail,
+                    &counters.server_fail,
+                    &counters.conn_error,
                 );
-            }
-            Err(_) => {
-                let (success, client_fail, server_fail, conn_error) = counters.into_local();
-                compute_stats(
-                    &job_cpu,
-                    iter_counter,
-                    &success,
-                    &client_fail,
-                    &server_fail,
-                    &conn_error,
-                );
-                break;
-            }
-            Ok(_) => eprintln!("Unexpected message sent to stats thread. Ignoring."),
+            },
+            recv(sample_rx) -> result => {
+                if let Ok(entry) = result{
+                    let totals = if entry.response_code.starts_with("4") {
+                        &mut counters.client_fail
+                    } else if entry.response_code.starts_with("5") {
+                        &mut counters.server_fail
+                    } else if entry.response_code == "conn_error" {
+                        &mut counters.conn_error
+                    } else {
+                        &mut counters.success
+                    };
+                    totals.count += 1;
+                    totals
+                        .elapsed += entry.elapsed.as_millis() as u64;
+                    totals.bytes_up += entry.bytes_up;
+                    totals
+                        .bytes_down += entry.bytes_down;
+                }
+            },
+            recv(liveness_rx) -> liveness => {
+                if liveness.is_err() {
+                    // Report the periodic stats one last time before printing the report.
+                    compute_stats(
+                        &job_cpu,
+                        iter_counter,
+                        &counters.success,
+                        &counters.client_fail,
+                        &counters.server_fail,
+                        &counters.conn_error,
+                    );
+                    break;
+                }
+            },
         }
     }
     let end_cpu = cputime::cpu();
     let end_dt = Utc::now();
     let total_cpu = end_cpu - job_cpu;
     let total_runtime_sec = total_cpu.elapsed.as_secs_f64();
-    let (success, client_fail, server_fail, conn_error) = counters.into_local();
 
     fn byte_format(bytes: u64) -> String {
         if bytes < 100_000 {
@@ -576,42 +620,49 @@ fn stats(rx: Receiver<()>, counters: Arc<TotalsSet>, stat_period: Duration) {
         end_dt.to_rfc3339_opts(SecondsFormat::Secs, true)
     );
     println!("Elapsed time:            {:>12.3} s", total_runtime_sec);
-    let total_requests = success.count + client_fail.count + server_fail.count + conn_error.count;
+    let total_requests = counters.success.count
+        + counters.client_fail.count
+        + counters.server_fail.count
+        + counters.conn_error.count;
     println!("Total requests:          {:>8}", total_requests);
     println!(
         "Total good requests:     {:>8}     ({:>5.1}%)",
-        success.count,
-        success.count as f64 / total_requests as f64 * 100f64
+        counters.success.count,
+        counters.success.count as f64 / total_requests as f64 * 100f64
     );
     println!(
         "Total 4xx requests:      {:>8}     ({:>5.1}%)",
-        client_fail.count,
-        client_fail.count as f64 / total_requests as f64 * 100f64
+        counters.client_fail.count,
+        counters.client_fail.count as f64 / total_requests as f64 * 100f64
     );
     println!(
         "Total 5xx requests:      {:>8}     ({:>5.1}%)",
-        server_fail.count,
-        server_fail.count as f64 / total_requests as f64 * 100f64
+        counters.server_fail.count,
+        counters.server_fail.count as f64 / total_requests as f64 * 100f64
     );
     println!(
         "Total connection errors: {:>8}     ({:>5.1}%)",
-        conn_error.count,
-        conn_error.count as f64 / total_requests as f64 * 100f64
+        counters.conn_error.count,
+        counters.conn_error.count as f64 / total_requests as f64 * 100f64
     );
-    let total_request_sec =
-        (success.elapsed + client_fail.elapsed + server_fail.elapsed + conn_error.elapsed) as f64
-            / 1000f64;
+    let total_request_sec = (counters.success.elapsed
+        + counters.client_fail.elapsed
+        + counters.server_fail.elapsed
+        + counters.conn_error.elapsed) as f64
+        / 1000f64;
     println!(
         "Total request time:      {:>12.3} seconds",
         total_request_sec
     );
-    let total_data_up =
-        success.bytes_up + client_fail.bytes_up + server_fail.bytes_up + conn_error.bytes_up;
+    let total_data_up = counters.success.bytes_up
+        + counters.client_fail.bytes_up
+        + counters.server_fail.bytes_up
+        + counters.conn_error.bytes_up;
     println!("Total data uploaded:     {}", byte_format(total_data_up));
-    let total_data_down = success.bytes_down
-        + client_fail.bytes_down
-        + server_fail.bytes_down
-        + conn_error.bytes_down;
+    let total_data_down = counters.success.bytes_down
+        + counters.client_fail.bytes_down
+        + counters.server_fail.bytes_down
+        + counters.conn_error.bytes_down;
     println!("Total data downloaded:   {}", byte_format(total_data_down));
     println!(
         "Request rate:            {:>12.3} req/sec",
@@ -730,34 +781,9 @@ pub fn run_traffic(config: Configuration, urls: Receiver<UrlEntry>) {
     scope(|scope| {
         let (tx, rx) = bounded(1);
         let (result_tx, result_rx) = bounded(1000);
-        let (stat_tx, stat_rx) = bounded(0);
+        let (stat_liveness_tx, stat_liveness_rx) = bounded(0);
+        let (stats_tx, stats_rx) = bounded(1000);
         let (cancel_tx, cancel_rx) = bounded(0);
-        let counters = Arc::new(TotalsSet {
-            success: Totals {
-                count: AtomicU64::new(0),
-                bytes_up: AtomicU64::new(0),
-                bytes_down: AtomicU64::new(0),
-                elapsed: AtomicU64::new(0),
-            },
-            client_fail: Totals {
-                count: AtomicU64::new(0),
-                bytes_up: AtomicU64::new(0),
-                bytes_down: AtomicU64::new(0),
-                elapsed: AtomicU64::new(0),
-            },
-            server_fail: Totals {
-                count: AtomicU64::new(0),
-                bytes_up: AtomicU64::new(0),
-                bytes_down: AtomicU64::new(0),
-                elapsed: AtomicU64::new(0),
-            },
-            conn_error: Totals {
-                count: AtomicU64::new(0),
-                bytes_up: AtomicU64::new(0),
-                bytes_down: AtomicU64::new(0),
-                elapsed: AtomicU64::new(0),
-            },
-        });
 
         let mut builder = Client::builder().user_agent(config.user_agent);
         if !config.timeout.is_zero() {
@@ -806,8 +832,7 @@ pub fn run_traffic(config: Configuration, urls: Receiver<UrlEntry>) {
         }
 
         // Spin up logger outputter
-        let counters_a = counters.clone();
-        let logger_thread = scope.spawn(|| logger(result_rx, counters_a));
+        let logger_thread = scope.spawn(|| logger(result_rx, stats_tx));
         ctrlc::set_handler(move || cancel_tx.send(()).expect("Unable to send cancel signal."))
             .expect("Could not set up Ctrl-C handler.");
 
@@ -815,8 +840,7 @@ pub fn run_traffic(config: Configuration, urls: Receiver<UrlEntry>) {
         wait_for_start(config.start_at, &cancel_rx);
 
         // Spin up cpu and mem stats outputter
-        let counters_b = counters.clone();
-        let stats_thread = scope.spawn(|| stats(stat_rx, counters_b, config.stat_period));
+        let stats_thread = scope.spawn(|| stats(stat_liveness_rx, stats_rx, config.stat_period));
 
         // Send traffic
         let start = Instant::now();
@@ -874,7 +898,7 @@ pub fn run_traffic(config: Configuration, urls: Receiver<UrlEntry>) {
         let end_cpu = cputime::cpu(); // Capture CPU as soon as job completes.
 
         // Signal to stats thread to shutdown
-        drop(stat_tx);
+        drop(stat_liveness_tx);
         if let Err(e) = stats_thread.join() {
             eprintln!(
                 "Failed to signal the stats thread to stop gracefully. Error: {:?}",
