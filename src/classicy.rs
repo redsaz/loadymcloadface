@@ -202,7 +202,7 @@ fn traffic_user(
                     timestamp,
                     elapsed,
                     success: false,
-                    response_code: "conn_error".to_string(),
+                    response_code: format!("error: {}", kind),
                     bytes_up: 0,
                     bytes_down: 0,
                     method: url_entry.method.to_string(),
@@ -248,6 +248,7 @@ fn logger(rx: Receiver<Sample>, stats_tx: Sender<Sample>) {
             break;
         }
         count += 1;
+        writeln!(log, "{}", entry).unwrap();
         let _ = stats_tx.send(entry);
     }
     log.flush().unwrap();
@@ -547,7 +548,7 @@ fn stats(liveness_rx: Receiver<()>, sample_rx: Receiver<Sample>, stat_period: Du
                         &mut counters.client_fail
                     } else if entry.response_code.starts_with("5") {
                         &mut counters.server_fail
-                    } else if entry.response_code == "conn_error" {
+                    } else if entry.response_code.starts_with("error:") {
                         &mut counters.conn_error
                     } else {
                         &mut counters.success
