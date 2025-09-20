@@ -9,6 +9,7 @@ use reqwest::blocking::Client;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use reqwest::{StatusCode, Url};
 use std::cmp::min;
+use std::collections::HashMap;
 use std::error::Error;
 use std::fmt;
 use std::fs::File;
@@ -193,7 +194,6 @@ fn traffic_user(
             }
             Result::Err(e) => {
                 let kind = get_error_short(e);
-                eprintln!("{:?}", kind);
                 conn_error_count += 1;
                 conn_error_duration += start.elapsed();
                 let elapsed = start.elapsed();
@@ -467,6 +467,7 @@ fn compute_stats(
 fn stats(liveness_rx: Receiver<()>, sample_rx: Receiver<Sample>, stat_period: Duration) {
     let start_dt = Utc::now();
     let job_cpu = cputime::cpu();
+    let mut error_counts: HashMap<String, usize> = HashMap::new();
     let mut counters = TotalsSet {
         success: Totals {
             count: 0,
@@ -528,7 +529,6 @@ fn stats(liveness_rx: Receiver<()>, sample_rx: Receiver<Sample>, stat_period: Du
     };
 
     let ticker = tick(stat_period);
-
     loop {
         select_biased! {
             recv(ticker) -> _ => {
@@ -541,6 +541,17 @@ fn stats(liveness_rx: Receiver<()>, sample_rx: Receiver<Sample>, stat_period: Du
                     &counters.server_fail,
                     &counters.conn_error,
                 );
+                if !error_counts.is_empty() {
+                    error_counts
+                        .drain()
+                        .for_each(|(err, count)| {
+                            if count > 1 {
+                                eprintln!("{} ({} times)", err, count);
+                            } else {
+                                eprintln!("{}", err);
+                            }
+                        });
+                }
             },
             recv(sample_rx) -> result => {
                 if let Ok(entry) = result{
@@ -549,6 +560,8 @@ fn stats(liveness_rx: Receiver<()>, sample_rx: Receiver<Sample>, stat_period: Du
                     } else if entry.response_code.starts_with("5") {
                         &mut counters.server_fail
                     } else if entry.response_code.starts_with("error:") {
+                        let count = error_counts.entry(entry.response_code).or_insert(0);
+                        *count += 1;
                         &mut counters.conn_error
                     } else {
                         &mut counters.success
@@ -572,6 +585,9 @@ fn stats(liveness_rx: Receiver<()>, sample_rx: Receiver<Sample>, stat_period: Du
                         &counters.server_fail,
                         &counters.conn_error,
                     );
+                    if !error_counts.is_empty() {
+                        eprintln!("{:?}", error_counts);
+                    }
                     break;
                 }
             },
