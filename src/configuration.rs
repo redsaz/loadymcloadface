@@ -12,6 +12,8 @@ use std::time::Duration;
 /// Configuration for running a load test.
 #[derive(/*Serialize, Deserialize, */ Debug)]
 pub struct Configuration {
+    /// The file to write sample data to, as CSV.
+    pub results_file: PathBuf,
     /// If true then print debug info
     pub debug: bool,
     /// The urls file may be a list of paths, which are tacked on to the end of this base URL.
@@ -155,6 +157,7 @@ pub fn config() -> Result<Configuration, ConfigError> {
                 .with_list_parse_key("headers")
                 .try_parsing(true),
         )
+        .set_default("results_file", "./results.log")?
         .set_default("debug", "false")?
         .set_default("baseurl", "http://localhost/")?
         .set_default("threads", 10)?
@@ -177,6 +180,7 @@ pub fn config() -> Result<Configuration, ConfigError> {
         .build()?;
 
     if s.get_bool("debug").unwrap_or_default() {
+        eprintln!("results_file: {:?}", s.get::<String>("results_file"));
         eprintln!("debug: {:?}", s.get_bool("debug"));
         eprintln!("baseurl: {:?}", s.get::<String>("baseurl"));
         eprintln!("threads: {:?}", s.get_int("threads"));
@@ -198,6 +202,8 @@ pub fn config() -> Result<Configuration, ConfigError> {
         );
     }
 
+    let results_file = PathBuf::from(&s.get_string("results_file").unwrap());
+
     let urls_file = PathBuf::from(&s.get_string("urls_file").unwrap());
     // This doesn't prevent time-of-check to time-of-use issue. It's simply to help the user
     // know what to do.
@@ -213,6 +219,7 @@ pub fn config() -> Result<Configuration, ConfigError> {
     }
 
     Ok(Configuration {
+        results_file: results_file,
         debug: s.get("debug").unwrap(),
         baseurl: Url::parse(s.get_string("baseurl").unwrap().as_str()).unwrap(),
         connection: s.get("connection").unwrap(),

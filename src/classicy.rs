@@ -4,16 +4,16 @@ use crate::siegeurls::{BodyData, UrlEntry};
 use chrono::{DateTime, FixedOffset, SecondsFormat, Utc};
 use crossbeam::channel::{bounded, select_biased, tick, Receiver, Sender};
 use crossbeam::select;
+use csv::Writer;
 use log::{debug, log_enabled, Level};
 use reqwest::blocking::Client;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use reqwest::{StatusCode, Url};
+use serde::Serialize;
 use std::cmp::min;
 use std::collections::HashMap;
 use std::error::Error;
-use std::fmt;
-use std::fs::File;
-use std::io::{BufWriter, Write};
+use std::path::Path;
 use std::thread::scope;
 use std::time::{Duration, Instant};
 
@@ -39,39 +39,28 @@ struct Totals {
     cpu: ProcPidStats,
 }
 
-// useful jmeter values:
+// Rather than these jmeter columns...
 // "timeStamp","elapsed","label","responseCode","threadName","success","bytes","allThreads"
-#[derive(Debug)]
+// ...We'll make our own of:
+/// The result of a call.
+#[derive(Debug, Serialize)]
 struct Sample {
-    timestamp: DateTime<Utc>,
-    elapsed: Duration,
-    success: bool,
-    response_code: String,
+    /// When, in millis since the Unix epoch UTC, the call completed.
+    completed_at_ms: i64,
+    /// How long, in millis, the call took to complete.
+    duration_ms: u32,
+    /// If the call failed or not. 0 is pass, non-zero is fail.
+    fail: u8,
+    /// The status code of the call response. May be a short error description instead.
+    status: String,
+    /// The number of bytes sent in the body request.
     bytes_up: u64,
+    /// The number of bytes received in the body response.
     bytes_down: u64,
-    method: String,
-    url: String,
-    thread: usize,
-    threads: usize,
-}
-
-impl fmt::Display for Sample {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(
-            f,
-            "{},{},{},{},{},{},{},{},{},{}",
-            self.timestamp.timestamp_millis(),
-            self.elapsed.as_millis(),
-            self.success,
-            self.response_code,
-            self.bytes_up,
-            self.bytes_down,
-            self.method,
-            self.url,
-            self.thread,
-            self.threads
-        )
-    }
+    /// The call that was made: the verb and path.
+    call: String,
+    /// The thread id that made the call.
+    thread: String,
 }
 
 fn hit_target(
@@ -145,8 +134,7 @@ fn get_error_short(e: Box<dyn Error>) -> String {
 fn traffic_user(
     baseurl: Url,
     base_headers: Vec<String>,
-    thread: usize,
-    threads: usize,
+    thread_name: String,
     rx: Receiver<Option<UrlEntry>>,
     client: Client,
     result_tx: Sender<Sample>,
@@ -180,16 +168,18 @@ fn traffic_user(
                 }
 
                 Sample {
-                    timestamp,
-                    elapsed,
-                    success: v.status.is_success(),
-                    response_code: v.status.as_str().to_string(),
+                    completed_at_ms: (timestamp + elapsed).timestamp_millis(),
+                    duration_ms: elapsed.as_millis() as u32,
+                    fail: if v.status.is_success() { 0 } else { 1 },
+                    status: v.status.as_str().to_string(),
                     bytes_up: v.bytes_sent,
                     bytes_down: v.bytes_received,
-                    method: url_entry.method.to_string(),
-                    url: url_entry.urlpart.to_string(),
-                    thread,
-                    threads,
+                    call: format!(
+                        "{} {}",
+                        url_entry.method.to_string(),
+                        url_entry.urlpart.to_string()
+                    ),
+                    thread: thread_name.to_string(),
                 }
             }
             Result::Err(e) => {
@@ -199,16 +189,18 @@ fn traffic_user(
                 let elapsed = start.elapsed();
 
                 Sample {
-                    timestamp,
-                    elapsed,
-                    success: false,
-                    response_code: format!("error: {}", kind),
+                    completed_at_ms: (timestamp + elapsed).timestamp_millis(),
+                    duration_ms: elapsed.as_millis() as u32,
+                    fail: 1,
+                    status: format!("error: {}", kind),
                     bytes_up: 0,
                     bytes_down: 0,
-                    method: url_entry.method.to_string(),
-                    url: url_entry.urlpart.to_string(),
-                    thread,
-                    threads,
+                    call: format!(
+                        "{} {}",
+                        url_entry.method.to_string(),
+                        url_entry.urlpart.to_string()
+                    ),
+                    thread: thread_name.to_string(),
                 }
             }
         };
@@ -236,22 +228,22 @@ fn traffic_user(
     count
 }
 
-fn logger(rx: Receiver<Sample>, stats_tx: Sender<Sample>) {
-    let mut log = BufWriter::new(File::create("results.log").unwrap());
+fn logger(results_file: &Path, rx: Receiver<Sample>, stats_tx: Sender<Sample>) {
+    let mut csv = Writer::from_path(results_file).unwrap();
     let mut count = 0;
     loop {
         let entry = rx.recv().unwrap();
-        if entry.elapsed == Duration::MAX {
+        if entry.duration_ms == u32::MAX {
             // Got the signal to quit
             // (Ideally, this'd be a watch or broadcaster and we'd select
             // between that receiver and the "main" receiver, but this'll do)
             break;
         }
         count += 1;
-        writeln!(log, "{}", entry).unwrap();
+        csv.serialize(&entry).unwrap();
         let _ = stats_tx.send(entry);
     }
-    log.flush().unwrap();
+    csv.flush().unwrap();
     debug!("Logging complete. Received {} entries.", count);
 }
 
@@ -449,7 +441,6 @@ fn compute_stats(
     let calls_ms_total = end_counter.elapsed - iter_counter.elapsed;
     let bytes_up = end_counter.bytes_up - iter_counter.bytes_up;
     let bytes_down = end_counter.bytes_down - iter_counter.bytes_down;
-    // let mem = memory_stats::memory_stats().unwrap();
     report_stats(
         now,
         runtime,
@@ -555,12 +546,12 @@ fn stats(liveness_rx: Receiver<()>, sample_rx: Receiver<Sample>, stat_period: Du
             },
             recv(sample_rx) -> result => {
                 if let Ok(entry) = result{
-                    let totals = if entry.response_code.starts_with("4") {
+                    let totals = if entry.status.starts_with("4") {
                         &mut counters.client_fail
-                    } else if entry.response_code.starts_with("5") {
+                    } else if entry.status.starts_with("5") {
                         &mut counters.server_fail
-                    } else if entry.response_code.starts_with("error:") {
-                        let count = error_counts.entry(entry.response_code).or_insert(0);
+                    } else if entry.status.starts_with("error:") {
+                        let count = error_counts.entry(entry.status).or_insert(0);
                         *count += 1;
                         &mut counters.conn_error
                     } else {
@@ -568,7 +559,7 @@ fn stats(liveness_rx: Receiver<()>, sample_rx: Receiver<Sample>, stat_period: Du
                     };
                     totals.count += 1;
                     totals
-                        .elapsed += entry.elapsed.as_millis() as u64;
+                        .elapsed += entry.duration_ms as u64;
                     totals.bytes_up += entry.bytes_up;
                     totals
                         .bytes_down += entry.bytes_down;
@@ -760,16 +751,14 @@ pub fn run_traffic(config: Configuration, urls: Receiver<UrlEntry>) {
     // TODO: A better way to do an end-of-message signal is a completely different channel,
     // or use an enum.
     let stop_logging = Sample {
-        timestamp: DateTime::from_timestamp_nanos(12344321),
-        elapsed: Duration::MAX,
-        success: true,
-        response_code: "__END__".to_string(),
+        completed_at_ms: Utc::now().timestamp_millis(),
+        duration_ms: u32::MAX,
+        fail: 0,
+        status: "__END__".to_string(),
         bytes_up: 12344321,
         bytes_down: 12344321,
-        method: "GET".to_string(),
-        url: "hmm".to_string(),
-        thread: 0,
-        threads: 0,
+        call: "END_RUN".to_string(),
+        thread: "0".to_string(),
     };
 
     let num_threads = if config.threads == 0 {
@@ -826,6 +815,7 @@ pub fn run_traffic(config: Configuration, urls: Receiver<UrlEntry>) {
         let client = builder.build().unwrap();
 
         let mut threads = Vec::with_capacity(num_threads);
+        let node = config.node;
 
         // Spin up traffic generators
         for thread in 0..num_threads {
@@ -834,12 +824,17 @@ pub fn run_traffic(config: Configuration, urls: Receiver<UrlEntry>) {
             let thread_result_tx = result_tx.clone();
             let thread_baseurl = config.baseurl.clone();
             let thread_base_headers = headers.clone();
+            let thread_name = if config.nodes > 1 {
+                let thread_id = thread + 1;
+                format!("{node}-{thread_id}")
+            } else {
+                format!("{thread}")
+            };
             let handle = scope.spawn(move || {
                 traffic_user(
                     thread_baseurl,
                     thread_base_headers,
-                    thread,
-                    num_threads,
+                    thread_name,
                     thread_rx,
                     thread_client,
                     thread_result_tx,
@@ -849,7 +844,7 @@ pub fn run_traffic(config: Configuration, urls: Receiver<UrlEntry>) {
         }
 
         // Spin up logger outputter
-        let logger_thread = scope.spawn(|| logger(result_rx, stats_tx));
+        let logger_thread = scope.spawn(|| logger(&config.results_file, result_rx, stats_tx));
         ctrlc::set_handler(move || cancel_tx.send(()).expect("Unable to send cancel signal."))
             .expect("Could not set up Ctrl-C handler.");
 
