@@ -4,10 +4,9 @@ use std::ops::Sub;
 use std::time::{Duration, Instant};
 
 /// Number of cpu ticks per second.
-static SC_CLK_TCK: std::sync::LazyLock<usize> =
-    std::sync::LazyLock::new(|| ProcPidStats::sc_clk_tck());
+static SC_CLK_TCK: std::sync::LazyLock<usize> = std::sync::LazyLock::new(ProcPidStats::sc_clk_tck);
 /// When the process started.
-static START_INSTANT: std::sync::LazyLock<Instant> = std::sync::LazyLock::new(|| Instant::now());
+static START_INSTANT: std::sync::LazyLock<Instant> = std::sync::LazyLock::new(Instant::now);
 
 pub fn init() {
     let _ = &*START_INSTANT;
@@ -51,8 +50,7 @@ impl ProcPidStats {
 
     fn sc_clk_tck() -> usize {
         // clock ticks is typically 100 Hz
-        let tck = unsafe { libc::sysconf(libc::_SC_CLK_TCK) as usize };
-        tck
+        unsafe { libc::sysconf(libc::_SC_CLK_TCK) as usize }
     }
 
     fn fetch() -> Result<ProcPidStats> {

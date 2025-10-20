@@ -66,7 +66,7 @@ struct Sample {
 fn hit_target(
     client: &Client,
     baseurl: &Url,
-    base_headers: &Vec<String>,
+    base_headers: &[String],
     url_entry: &UrlEntry,
 ) -> Result<CallResult, Box<dyn std::error::Error>> {
     let url = baseurl.join(&url_entry.urlpart.clone()).unwrap();
@@ -174,11 +174,7 @@ fn traffic_user(
                     status: v.status.as_str().to_string(),
                     bytes_up: v.bytes_sent,
                     bytes_down: v.bytes_received,
-                    call: format!(
-                        "{} {}",
-                        url_entry.method.to_string(),
-                        url_entry.urlpart.to_string()
-                    ),
+                    call: format!("{} {}", url_entry.method, url_entry.urlpart),
                     thread: thread_name.to_string(),
                 }
             }
@@ -195,11 +191,7 @@ fn traffic_user(
                     status: format!("error: {}", kind),
                     bytes_up: 0,
                     bytes_down: 0,
-                    call: format!(
-                        "{} {}",
-                        url_entry.method.to_string(),
-                        url_entry.urlpart.to_string()
-                    ),
+                    call: format!("{} {}", url_entry.method, url_entry.urlpart),
                     thread: thread_name.to_string(),
                 }
             }
@@ -247,7 +239,7 @@ fn logger(results_file: &Path, rx: Receiver<Sample>, stats_tx: Sender<Sample>) {
     debug!("Logging complete. Received {} entries.", count);
 }
 
-fn report_stats(
+struct Stats {
     report_dt: DateTime<Utc>,
     job_elapsed: Duration,
     iter_elapsed: Duration,
@@ -257,24 +249,26 @@ fn report_stats(
     iter_bytes_up: u64,
     iter_bytes_down: u64,
     iter_cores: f32,
-) {
+}
+
+fn report_stats(stats: &Stats) {
     // Example:
     // 2025-09-08T06:18:01Z 0:00:01 1707req/s 1225ms/req 99.0%err 123KB/s:up 123KB/s:dn 21.0cores
 
     // Datetime and elapsed job time
-    let (h, m, s) = cputime::duration_hms(job_elapsed);
+    let (h, m, s) = cputime::duration_hms(stats.job_elapsed);
     print!(
         "{} {}:{:02}:{:02}",
-        report_dt.to_rfc3339_opts(SecondsFormat::Secs, true),
+        stats.report_dt.to_rfc3339_opts(SecondsFormat::Secs, true),
         h,
         m,
         s
     );
 
-    let iter_ms = iter_elapsed.as_millis() as u64;
+    let iter_ms = stats.iter_elapsed.as_millis() as u64;
 
     // requests per time period
-    let reqs_sec = iter_reqs * 1000 / iter_ms;
+    let reqs_sec = stats.iter_reqs * 1000 / iter_ms;
     if reqs_sec >= 10_000 {
         // " 10kreq/s"
         print!(" {:3.0}kreq/s", reqs_sec / 1000);
@@ -284,8 +278,8 @@ fn report_stats(
     }
 
     // average response time
-    let ms_req = if iter_reqs > 0 {
-        iter_req_ms_total as f64 / iter_reqs as f64
+    let ms_req = if stats.iter_reqs > 0 {
+        stats.iter_req_ms_total as f64 / stats.iter_reqs as f64
     } else {
         0f64
     };
@@ -308,8 +302,8 @@ fn report_stats(
     }
 
     // percentage of calls in error
-    let err_perc = if iter_reqs > 0 {
-        iter_errs as f64 / iter_reqs as f64 * 100f64
+    let err_perc = if stats.iter_reqs > 0 {
+        stats.iter_errs as f64 / stats.iter_reqs as f64 * 100f64
     } else {
         0f64
     };
@@ -325,7 +319,7 @@ fn report_stats(
     }
 
     // upload rate
-    let rate_up_bytes = iter_bytes_up as f64 * 1000f64 / iter_ms as f64;
+    let rate_up_bytes = stats.iter_bytes_up as f64 * 1000f64 / iter_ms as f64;
     if rate_up_bytes >= 100_000_000_000f64 {
         // " 100GB/s:up"
         print!(" {:4.0}GB/s:up", rate_up_bytes / 1_000_000_000f64);
@@ -356,7 +350,7 @@ fn report_stats(
     }
 
     // download rate
-    let rate_down_bytes = iter_bytes_down as f64 * 1000f64 / iter_ms as f64;
+    let rate_down_bytes = stats.iter_bytes_down as f64 * 1000f64 / iter_ms as f64;
     if rate_down_bytes >= 100_000_000_000f64 {
         // " 100GB/s:dn"
         print!(" {:4.0}GB/s:dn", rate_down_bytes / 1_000_000_000f64);
@@ -387,15 +381,15 @@ fn report_stats(
     }
 
     // cores used
-    if iter_cores >= 100f32 {
+    if stats.iter_cores >= 100f32 {
         // " 100cores"
-        println!(" {:4.0}cores", iter_cores);
-    } else if iter_cores >= 10f32 {
+        println!(" {:4.0}cores", stats.iter_cores);
+    } else if stats.iter_cores >= 10f32 {
         // 99.9cores
-        println!(" {:4.1}cores", iter_cores);
+        println!(" {:4.1}cores", stats.iter_cores);
     } else {
         // 9.99cores
-        println!(" {:4.2}cores", iter_cores);
+        println!(" {:4.2}cores", stats.iter_cores);
     }
 }
 
@@ -441,17 +435,18 @@ fn compute_stats(
     let calls_ms_total = end_counter.elapsed - iter_counter.elapsed;
     let bytes_up = end_counter.bytes_up - iter_counter.bytes_up;
     let bytes_down = end_counter.bytes_down - iter_counter.bytes_down;
-    report_stats(
-        now,
-        runtime,
-        iter_runtime,
-        calls_ms_total,
-        num_calls,
-        num_errs,
-        bytes_up,
-        bytes_down,
-        diff_cpu.cpu_cores(),
-    );
+    let stats = Stats {
+        report_dt: now,
+        job_elapsed: runtime,
+        iter_elapsed: iter_runtime,
+        iter_req_ms_total: calls_ms_total,
+        iter_reqs: num_calls,
+        iter_errs: num_errs,
+        iter_bytes_up: bytes_up,
+        iter_bytes_down: bytes_down,
+        iter_cores: diff_cpu.cpu_cores(),
+    };
+    report_stats(&stats);
     end_counter
 }
 
@@ -516,7 +511,7 @@ fn stats(liveness_rx: Receiver<()>, sample_rx: Receiver<Sample>, stat_period: Du
         count: 0,
         elapsed: 0,
         error_count: 0,
-        cpu: job_cpu.clone(),
+        cpu: job_cpu,
     };
 
     let ticker = tick(stat_period);
@@ -593,27 +588,27 @@ fn stats(liveness_rx: Receiver<()>, sample_rx: Receiver<Sample>, stat_period: Du
         if bytes < 100_000 {
             format!("{:>8}     bytes", bytes)
         } else if bytes < 100_000_000 {
-            format!("{:>12.3} KB", bytes as f64 / 1000f64)
+            format!("{:>12.3} KB", bytes as f64 / 1000_f64)
         } else if bytes < 100_000_000_000 {
-            format!("{:>12.3} MB", bytes as f64 / 1_000_000f64)
+            format!("{:>12.3} MB", bytes as f64 / 1_000_000_f64)
         } else if bytes < 100_000_000_000_000 {
-            format!("{:>12.3} GB", bytes as f64 / 1_000_000_000f64)
+            format!("{:>12.3} GB", bytes as f64 / 1_000_000_000_f64)
         } else {
-            format!("{:>12.3} TB", bytes as f64 / 1_000_000_000_000f64)
+            format!("{:>12.3} TB", bytes as f64 / 1_000_000_000_000_f64)
         }
     }
 
     fn byte_format_f64(bytes: f64) -> String {
-        if bytes < 100_000f64 {
+        if bytes < 100_000_f64 {
             format!("{:>12.3} bytes", bytes)
-        } else if bytes < 100_000_000f64 {
-            format!("{:>12.3} KB", bytes as f64 / 1000f64)
-        } else if bytes < 100_000_000_000f64 {
-            format!("{:>12.3} MB", bytes as f64 / 1_000_000f64)
-        } else if bytes < 100_000_000_000_000f64 {
-            format!("{:>12.3} GB", bytes as f64 / 1_000_000_000f64)
+        } else if bytes < 100_000_000_f64 {
+            format!("{:>12.3} KB", bytes / 1000_f64)
+        } else if bytes < 100_000_000_000_f64 {
+            format!("{:>12.3} MB", bytes / 1_000_000_f64)
+        } else if bytes < 100_000_000_000_000_f64 {
+            format!("{:>12.3} GB", bytes / 1_000_000_000_f64)
         } else {
-            format!("{:>12.3} TB", bytes as f64 / 1_000_000_000_000f64)
+            format!("{:>12.3} TB", bytes / 1_000_000_000_000_f64)
         }
     }
 
@@ -735,7 +730,7 @@ fn wait_for_start(start_at: Option<DateTime<FixedOffset>>, cancel_rx: &Receiver<
         loop {
             let ms_away = (start_at - Utc::now().fixed_offset()).num_milliseconds();
             if ms_away > 0 && !cancel {
-                eprint!("{}...", f64::round(ms_away as f64 / 1000 as f64));
+                eprint!("{}...", f64::round(ms_away as f64 / 1000_f64));
                 let ms_delay = Duration::from_millis(min(ms_away as u64, 1000));
                 cancel = cancel_rx.recv_timeout(ms_delay).is_ok();
             } else {
@@ -770,10 +765,9 @@ pub fn run_traffic(config: Configuration, urls: Receiver<UrlEntry>) {
 
     // Add the Connection header according to connection config, if the header isn't already there.
     let mut headers = config.headers.clone();
-    if headers
+    if !headers
         .iter()
-        .find(|header| header.to_ascii_lowercase().starts_with("connection:"))
-        .is_none()
+        .any(|header| header.to_ascii_lowercase().starts_with("connection:"))
     {
         if config.connection.eq_ignore_ascii_case("keep-alive") {
             headers.push("Connection: keep-alive".to_owned());
@@ -877,7 +871,7 @@ pub fn run_traffic(config: Configuration, urls: Receiver<UrlEntry>) {
                     // calls to "bunch up" after the hiccup completes, sending a swarm ASAP until delay
                     // catches up again.
                     let call_delay = url_entry.as_ref().unwrap().delay;
-                    delay_total += call_delay.clone();
+                    delay_total += call_delay;
                     let delay = delay_total
                         .checked_sub(start.elapsed())
                         .unwrap_or(Duration::ZERO);
@@ -922,7 +916,7 @@ pub fn run_traffic(config: Configuration, urls: Receiver<UrlEntry>) {
         let total = threads
             .into_iter()
             .map(|t| t.join().unwrap_or(0))
-            .fold(0, |acc, x| acc + x);
+            .sum::<usize>();
 
         // Signal to logger thread to shutdown
         if let Err(e) = result_tx.send(stop_logging) {

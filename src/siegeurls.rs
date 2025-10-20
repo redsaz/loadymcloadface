@@ -49,7 +49,7 @@ impl Iterator for SiegeUrls {
             let line = self.lines.next();
             if let Some(l) = line {
                 let line = l.unwrap();
-                let entry = self.parse_line(line.as_str(), self.default_delay.clone());
+                let entry = self.parse_line(line.as_str(), self.default_delay);
                 if entry.is_some() {
                     return entry;
                 }
@@ -77,19 +77,16 @@ enum Mode {
 }
 
 impl SiegeUrls {
-    fn parse_assignment<'a>(line: &'a str) -> Option<(&'a str, &'a str)> {
+    fn parse_assignment(line: &str) -> Option<(&str, &str)> {
         let line = line.trim();
+        // If "=" doesn't appear then this is not an assignment line.
         let assign = line.split_once("=");
 
-        // If "=" doesn't appear then this is not an assignment line.
-        if assign.is_none() {
-            return None;
-        }
         // If any non-alphanumeric characters or underscore appear before the "=" (save for
         // whitespace), then this is not an assignment line.
         // For example, any of ":", "?", "/", "$" appearing before "=" would be expected for legit
         // URLs.
-        let (name, value) = assign.unwrap();
+        let (name, value) = assign?;
         if name.contains(|c: char| !c.is_alphanumeric() && c != '_') {
             return None;
         }
@@ -129,7 +126,7 @@ impl SiegeUrls {
             let mut var_start = 0; // will be updated later
             let mut var_name; // will be updated later
             let line = &line[i..];
-            for (i, c) in line.chars().enumerate() {
+            for (i, c) in line.char_indices() {
                 match mode {
                     Mode::Normal => {
                         // Yup this gets copied and pasted later
@@ -259,9 +256,9 @@ impl SiegeUrls {
                     updated.push_str(&line[(var_start - 2)..]);
                 }
             }
-            return updated;
+            updated
         } else {
-            return line.to_owned();
+            line.to_owned()
         }
     }
 
@@ -274,15 +271,15 @@ impl SiegeUrls {
         line: &'a str,
     ) -> (Option<&'a str>, Option<&'a str>) {
         // If starts with -T, then its a Content-Type part
-        if line.starts_with("-T") {
-            if let Some((header, body)) = line[2..].split_once(';') {
+        if let Some(content_type) = line.strip_prefix("-T") {
+            if let Some((header, body)) = content_type.split_once(';') {
                 (Some(header.trim()), Some(body.trim()))
             } else {
                 // It turns out there was no closing semi-colon that siege 4.1.7 uses to close
                 // the Content-Type. (and why semi-colon? That's a legit char in that header.)
                 // Not sure what the best thing to do here is, so we'll say that the entire
                 // rest of the line is the header. Sure.
-                (Some(&line[2..].trim()), None)
+                (Some(content_type.trim()), None)
             }
         } else {
             (None, Some(line.trim()))
@@ -295,14 +292,13 @@ impl SiegeUrls {
     /// the body.)
     fn load_body_if_redirected(self: &SiegeUrls, body_opt: Option<&str>) -> BodyData {
         if let Some(body) = body_opt {
-            if body.starts_with('<') {
+            if let Some(filename) = body.strip_prefix('<') {
                 // We were not given a body, but a filename to load the body from
-                let filename = &body[1..].trim();
                 let file = Path::new(filename);
                 if file.is_file() {
                     // If the file is under a certain size, load it up now, otherwise get the
                     // filename so it can be loaded later.
-                    if std::fs::metadata(file).map_or(false, |meta| meta.len() <= 16384) {
+                    if std::fs::metadata(file).is_ok_and(|meta| meta.len() <= 16384) {
                         let content = std::fs::read(file).unwrap_or_default();
                         BodyData::Content(content)
                     } else {
@@ -613,7 +609,6 @@ impl SiegeUrls {
         let (tx, rx) = bounded(1000);
 
         let urls_txt = urls_txt.to_path_buf();
-        let default_delay = default_delay.clone();
         let mut current_offset: usize = 0;
         let mut added_delay = Duration::ZERO;
 
@@ -641,7 +636,7 @@ impl SiegeUrls {
                     url_entry.delay = delay;
                     added_delay = Duration::ZERO;
 
-                    if let Err(_) = tx.send(url_entry) {
+                    if tx.send(url_entry).is_err() {
                         debug!("Channel disconnected, will not send any more URLs.");
                         break;
                     }

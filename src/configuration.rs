@@ -68,7 +68,7 @@ pub struct Configuration {
 
 fn rate_from_string(rate_str: &str) -> Result<f64, ConfigError> {
     let unit =
-        rate_str.find(|c: char| c == '/' || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'));
+        rate_str.find(|c: char| c == '/' || c.is_ascii_lowercase() || c.is_ascii_uppercase());
     let (unit, amount) = if let Some(idx) = unit {
         (&rate_str[idx..], rate_str[..idx].parse::<f64>().unwrap())
     } else {
@@ -88,7 +88,7 @@ fn rate_from_string(rate_str: &str) -> Result<f64, ConfigError> {
 
 fn time_from_string(time_str: &str) -> Result<Duration, ConfigError> {
     let unit =
-        time_str.find(|c: char| c == '/' || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'));
+        time_str.find(|c: char| c == '/' || c.is_ascii_lowercase() || c.is_ascii_uppercase());
     let (unit, amount) = if let Some(idx) = unit {
         (&time_str[idx..], time_str[..idx].parse::<f64>().unwrap())
     } else {
@@ -120,9 +120,7 @@ fn datetime_from_string(datetime_str: Option<String>) -> Option<DateTime<FixedOf
 }
 
 fn identity_from_string(pem_file_str: Option<String>) -> Option<Identity> {
-    if pem_file_str.is_none() {
-        return Option::None;
-    }
+    pem_file_str.as_ref()?;
     let mut buf = Vec::new();
     std::fs::File::open(pem_file_str.unwrap())
         .unwrap()
@@ -219,7 +217,7 @@ pub fn config() -> Result<Configuration, ConfigError> {
     }
 
     Ok(Configuration {
-        results_file: results_file,
+        results_file,
         debug: s.get("debug").unwrap(),
         baseurl: Url::parse(s.get_string("baseurl").unwrap().as_str()).unwrap(),
         connection: s.get("connection").unwrap(),
@@ -234,7 +232,7 @@ pub fn config() -> Result<Configuration, ConfigError> {
         identity_pem: identity_from_string(s.get("identity_pem").unwrap()),
         insecure: s.get("insecure").unwrap(),
         stat_period: time_from_string(&s.get_string("stat_period").unwrap()).unwrap(),
-        urls_file: urls_file,
+        urls_file,
         user_agent: s.get("user_agent").unwrap(),
     })
 }
