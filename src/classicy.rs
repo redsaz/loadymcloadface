@@ -572,7 +572,15 @@ fn stats(liveness_rx: Receiver<()>, sample_rx: Receiver<Sample>, stat_period: Du
                         &counters.conn_error,
                     );
                     if !error_counts.is_empty() {
-                        eprintln!("{:?}", error_counts);
+                        error_counts
+                            .drain()
+                            .for_each(|(err, count)| {
+                                if count > 1 {
+                                    eprintln!("{} ({} times)", err, count);
+                                } else {
+                                    eprintln!("{}", err);
+                                }
+                            });
                     }
                     break;
                 }
@@ -622,7 +630,10 @@ fn stats(liveness_rx: Receiver<()>, sample_rx: Receiver<Sample>, stat_period: Du
         "Finished:              {}",
         end_dt.to_rfc3339_opts(SecondsFormat::Secs, true)
     );
-    println!("Elapsed time:            {:>12.3} s", total_runtime_sec);
+    println!(
+        "Elapsed time:            {:>12.3} seconds",
+        total_runtime_sec
+    );
     let total_requests = counters.success.count
         + counters.client_fail.count
         + counters.server_fail.count
@@ -684,7 +695,7 @@ fn stats(liveness_rx: Receiver<()>, sample_rx: Receiver<Sample>, stat_period: Du
         total_request_sec / total_runtime_sec
     );
     println!(
-        "Avg request time:        {:>12.3} ms",
+        "Avg request time:        {:>12.3} milliseconds",
         total_request_sec * 1000f64 / total_requests as f64
     );
     println!(
