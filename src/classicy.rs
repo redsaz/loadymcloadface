@@ -59,6 +59,8 @@ struct Sample {
     bytes_down: u64,
     /// The call that was made: the verb and path.
     call: String,
+    /// Used for grouping calls together.
+    label: String,
     /// The thread id that made the call.
     thread: String,
 }
@@ -175,6 +177,7 @@ fn traffic_user(
                     bytes_up: v.bytes_sent,
                     bytes_down: v.bytes_received,
                     call: format!("{} {}", url_entry.method, url_entry.urlpart),
+                    label: "".to_string(),
                     thread: thread_name.to_string(),
                 }
             }
@@ -192,6 +195,7 @@ fn traffic_user(
                     bytes_up: 0,
                     bytes_down: 0,
                     call: format!("{} {}", url_entry.method, url_entry.urlpart),
+                    label: "".to_string(),
                     thread: thread_name.to_string(),
                 }
             }
@@ -764,6 +768,7 @@ pub fn run_traffic(config: Configuration, urls: Receiver<UrlEntry>) {
         bytes_up: 12344321,
         bytes_down: 12344321,
         call: "END_RUN".to_string(),
+        label: "".to_string(),
         thread: "0".to_string(),
     };
 
