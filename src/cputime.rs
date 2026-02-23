@@ -1,10 +1,8 @@
 use std::fs::File;
-use std::io::{BufReader, Read, Result};
+use std::io::{BufReader, Error, Read, Result};
 use std::ops::Sub;
 use std::time::{Duration, Instant};
 
-/// Number of cpu ticks per second.
-static SC_CLK_TCK: std::sync::LazyLock<usize> = std::sync::LazyLock::new(ProcPidStats::sc_clk_tck);
 /// When the process started.
 static START_INSTANT: std::sync::LazyLock<Instant> = std::sync::LazyLock::new(Instant::now);
 
@@ -48,48 +46,28 @@ impl ProcPidStats {
         (self.system + self.user).div_duration_f32(self.elapsed)
     }
 
-    fn sc_clk_tck() -> usize {
-        // clock ticks is typically 100 Hz
-        unsafe { libc::sysconf(libc::_SC_CLK_TCK) as usize }
-    }
-
     fn fetch() -> Result<ProcPidStats> {
-        // Read /proc/$pid/stat to get
-        // utime (ticks), stime (ticks), and start time (seconds since boot)
-        let mut buf = [0u8; 8192];
-        let size = BufReader::new(File::open("/proc/self/stat")?).read(&mut buf)?;
-
-        // Find the last index where ')' is found, and read from after the next byte to the end,
-        // in order to skip the filename (which could be non-utf8, or have one or more
-        // parentheses)
-        let mut post_filename_pos = 0;
-
-        for (i, char) in buf.iter().enumerate() {
-            if *char == 0x29u8 {
-                post_filename_pos = i + 2;
+        unsafe {
+            let mut usage = std::mem::MaybeUninit::<libc::rusage>::uninit();
+            if libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) == 0 {
+                let usage = usage.assume_init();
+                let system_time = Duration::new(
+                    usage.ru_stime.tv_sec as u64,
+                    (usage.ru_stime.tv_usec * 1_000) as u32,
+                );
+                let user_time = Duration::new(
+                    usage.ru_utime.tv_sec as u64,
+                    (usage.ru_utime.tv_usec * 1_000) as u32,
+                );
+                Result::Ok(ProcPidStats {
+                    elapsed: (*START_INSTANT).elapsed(),
+                    system: system_time,
+                    user: user_time,
+                })
+            } else {
+                Result::Err(Error::other("Could not fetch usage info"))
             }
         }
-        // The part *after* the filename is safe to convert to utf8 string.
-        let mut utime = Option::None;
-        let mut stime = Option::None;
-        // let mut starttime = Option::None;
-        let values = std::str::from_utf8(&buf[post_filename_pos..size]).unwrap();
-        for (i, val) in values.split(' ').enumerate() {
-            if i == 11 {
-                utime = Option::Some(val.parse::<u64>().unwrap());
-            } else if i == 12 {
-                stime = Option::Some(val.parse::<u64>().unwrap());
-                // } else if i == 19 {
-                //     starttime = Option::Some(val.parse::<u64>().unwrap());
-            }
-        }
-
-        let sc_clk_tck = *SC_CLK_TCK;
-        Result::Ok(ProcPidStats {
-            elapsed: (*START_INSTANT).elapsed(),
-            system: Duration::from_millis(stime.unwrap() * 1000 / sc_clk_tck as u64),
-            user: Duration::from_millis(utime.unwrap() * 1000 / sc_clk_tck as u64),
-        })
     }
 }
 
