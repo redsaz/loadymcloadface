@@ -21,6 +21,13 @@ struct CallResult {
     status: StatusCode,
     bytes_sent: u64,
     bytes_received: u64,
+    // TODO: Can't do this with reqwest (blocking) mode without a custom std::io::read,
+    // /// When, in millis since the Unix epoch, the request was fully sent
+    // sent_at: Instant,
+    /// When the first byte of the response was received.
+    receive_start_at: Instant,
+    /// When the last byte of the response was received.
+    receive_end_at: Instant,
 }
 
 struct TotalsSet {
@@ -47,8 +54,19 @@ struct Totals {
 struct Sample {
     /// When, in millis since the Unix epoch UTC, the call completed.
     completed_at_ms: i64,
-    /// How long, in millis, the call took to complete.
+    /// How long, in millis, the call took to complete. This value, minus the
+    /// completed_at_ms value, results in the time the request started.
     duration_ms: u32,
+    // TODO: See CallResult for why this can't happen yet.
+    // /// How long, in millis, it took to send the request.
+    // send_ms: u32,
+    // TODO: See CallResult for why this can't happen yet.
+    // /// How long, in millis, it took to receive the first byte *after* sending the request
+    // /// (that is, this is the time between the request was sent and the reqsponse received.)
+    // wait_ms: u32,
+    /// How long, in millis, it took to receive the response. (That is, this is the time
+    /// after waiting for the first byte and receiving the last byte.)
+    receive_ms: u32,
     /// If the call failed or not. 0 is pass, non-zero is fail.
     fail: u8,
     /// The status code of the call response. May be a short error description instead.
@@ -91,21 +109,32 @@ fn hit_target(
     }
     req_builder = req_builder.headers(headers);
 
-    let (bytes_sent, req) = match &url_entry.body {
-        BodyData::Content(body) => (body.len() as u64, req_builder.body(body.clone()).send()?),
+    let (bytes_sent, req, receive_start_at) = match &url_entry.body {
+        BodyData::Content(body) => (
+            body.len() as u64,
+            req_builder.body(body.clone()).send()?,
+            Instant::now(),
+        ),
         BodyData::File(path) => {
             let file = std::fs::File::open(path)?;
-            (file.metadata()?.len(), req_builder.body(file).send()?)
+            (
+                file.metadata()?.len(),
+                req_builder.body(file).send()?,
+                Instant::now(),
+            )
         }
-        BodyData::None => (0u64, req_builder.send()?),
+        BodyData::None => (0u64, req_builder.send()?, Instant::now()),
     };
     let status = req.status();
-    let bytes_received = req.text()?.len() as u64;
+    let bytes_received = req.bytes()?.len() as u64;
+    let receive_end_at = Instant::now();
 
     Ok(CallResult {
         status,
         bytes_sent,
         bytes_received,
+        receive_start_at,
+        receive_end_at,
     })
 }
 
@@ -172,6 +201,10 @@ fn traffic_user(
                 Sample {
                     completed_at_ms: (timestamp + elapsed).timestamp_millis(),
                     duration_ms: elapsed.as_millis() as u32,
+                    receive_ms: v
+                        .receive_end_at
+                        .duration_since(v.receive_start_at)
+                        .as_millis() as u32,
                     fail: if v.status.is_success() { 0 } else { 1 },
                     status: v.status.as_str().to_string(),
                     bytes_up: v.bytes_sent,
@@ -190,6 +223,7 @@ fn traffic_user(
                 Sample {
                     completed_at_ms: (timestamp + elapsed).timestamp_millis(),
                     duration_ms: elapsed.as_millis() as u32,
+                    receive_ms: 0,
                     fail: 1,
                     status: format!("error: {}", kind),
                     bytes_up: 0,
@@ -763,6 +797,7 @@ pub fn run_traffic(config: Configuration, urls: Receiver<UrlEntry>) {
     let stop_logging = Sample {
         completed_at_ms: Utc::now().timestamp_millis(),
         duration_ms: u32::MAX,
+        receive_ms: u32::MAX,
         fail: 0,
         status: "__END__".to_string(),
         bytes_up: 12344321,
