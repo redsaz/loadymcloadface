@@ -14,6 +14,9 @@ use std::time::Duration;
 pub struct Configuration {
     /// The file to write sample data to, as CSV.
     pub results_file: PathBuf,
+    /// The file to write response info as lines of THAR entries.
+    /// Responses will only be written for entries in the urls file that request it.
+    pub responses_file: PathBuf,
     /// If true then print debug info
     pub debug: bool,
     /// The urls file may be a list of paths, which are tacked on to the end of this base URL.
@@ -156,6 +159,7 @@ pub fn config() -> Result<Configuration, ConfigError> {
                 .try_parsing(true),
         )
         .set_default("results_file", "./results.log")?
+        .set_default("responses_file", "./responses.tharl")?
         .set_default("debug", "false")?
         .set_default("baseurl", "http://localhost/")?
         .set_default("threads", 10)?
@@ -179,6 +183,7 @@ pub fn config() -> Result<Configuration, ConfigError> {
 
     if s.get_bool("debug").unwrap_or_default() {
         eprintln!("results_file: {:?}", s.get::<String>("results_file"));
+        eprintln!("responses_file: {:?}", s.get::<String>("responses_file"));
         eprintln!("debug: {:?}", s.get_bool("debug"));
         eprintln!("baseurl: {:?}", s.get::<String>("baseurl"));
         eprintln!("threads: {:?}", s.get_int("threads"));
@@ -201,6 +206,7 @@ pub fn config() -> Result<Configuration, ConfigError> {
     }
 
     let results_file = PathBuf::from(&s.get_string("results_file").unwrap());
+    let responses_file = PathBuf::from(&s.get_string("responses_file").unwrap());
 
     let urls_file = PathBuf::from(&s.get_string("urls_file").unwrap());
     // This doesn't prevent time-of-check to time-of-use issue. It's simply to help the user
@@ -218,6 +224,7 @@ pub fn config() -> Result<Configuration, ConfigError> {
 
     Ok(Configuration {
         results_file,
+        responses_file,
         debug: s.get("debug").unwrap(),
         baseurl: Url::parse(s.get_string("baseurl").unwrap().as_str()).unwrap(),
         connection: s.get("connection").unwrap(),

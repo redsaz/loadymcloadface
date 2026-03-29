@@ -31,6 +31,7 @@ pub struct UrlEntry {
     pub method: Method,
     pub content_type: Option<String>,
     pub body: BodyData,
+    pub capture_response: bool,
 }
 
 /// Allows fetching a stream of UrlEntry items.
@@ -463,6 +464,7 @@ impl SiegeUrls {
             method: Method::GET,
             content_type: None,
             body: BodyData::None,
+            capture_response: true,
         };
 
         let mut next;

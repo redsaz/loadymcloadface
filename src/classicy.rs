@@ -1,33 +1,77 @@
 use crate::configuration::Configuration;
 use crate::cputime::{self, ProcPidStats};
+use crate::har::{Content, Entry, PostData, Record, Request};
 use crate::siegeurls::{BodyData, UrlEntry};
 use chrono::{DateTime, FixedOffset, SecondsFormat, Utc};
 use crossbeam::channel::{bounded, select_biased, tick, Receiver, Sender};
 use crossbeam::select;
 use csv::Writer;
 use log::{debug, log_enabled, Level};
-use reqwest::blocking::Client;
+use reqwest::blocking::{Client, Response};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use reqwest::{StatusCode, Url};
 use serde::Serialize;
 use std::cmp::min;
 use std::collections::HashMap;
 use std::error::Error;
+use std::fs::File;
+use std::io::{BufWriter, Write};
 use std::path::Path;
 use std::thread::scope;
 use std::time::{Duration, Instant};
 
+/// When the thar time has this value, the thar logger should shut down.
+const TERMINATE_THAR_TIME: i64 = -1234;
+
+fn from_response(resp: Response) -> Result<crate::har::Response, Box<dyn std::error::Error>> {
+    let status = resp.status().as_u16() as i32;
+    let cookies = vec![];
+    let headers = resp
+        .headers()
+        .iter()
+        .map(|(k, v)| crate::har::Record {
+            name: k.to_string(),
+            value: v
+                .to_str()
+                .unwrap_or_else(|x| "[non-utf-8 bytes]")
+                .to_string(),
+        })
+        .collect();
+    let body = resp.bytes()?;
+    /* TODO: body */
+    let content = Content {
+            compression: /* TODO */ None,
+            mime_type: "TODO".to_owned(),
+            text: /* TODO */ None,
+            encoding: /* TODO */ None,
+            size: body.len() as i64,
+        };
+    Ok(crate::har::Response {
+        status,
+        cookies,
+        headers,
+        content,
+    })
+}
+
 struct CallResult {
+    url: String,
     status: StatusCode,
     bytes_sent: u64,
     bytes_received: u64,
+    /// Timestamp of when the request started.
+    timestamp_request_started: DateTime<Utc>,
+    /// When the request started.
+    request_started_at: Instant,
     // TODO: Can't do this with reqwest (blocking) mode without a custom std::io::read,
     // /// When, in millis since the Unix epoch, the request was fully sent
     // sent_at: Instant,
     /// When the first byte of the response was received.
-    receive_start_at: Instant,
+    receive_started_at: Instant,
     /// When the last byte of the response was received.
-    receive_end_at: Instant,
+    receive_ended_at: Instant,
+    // /// The response, only present if asked to capture it.
+    // response_data: Option<Response>,
 }
 
 struct TotalsSet {
@@ -86,12 +130,14 @@ struct Sample {
 fn hit_target(
     client: &Client,
     baseurl: &Url,
-    base_headers: &[String],
+    headers: HeaderMap,
     url_entry: &UrlEntry,
-) -> Result<CallResult, Box<dyn std::error::Error>> {
-    let url = baseurl.join(&url_entry.urlpart.clone()).unwrap();
+    timestamp_request_started: DateTime<Utc>,
+    request_started_at: Instant,
+) -> Result<(CallResult, Option<crate::har::Response>), Box<dyn std::error::Error>> {
+    let request_url = baseurl.join(&url_entry.urlpart.clone()).unwrap();
     let method = url_entry.method.clone();
-    let req_builder = client.request(method, url);
+    let req_builder = client.request(method, request_url);
 
     let mut req_builder = if let Some(content_type) = &url_entry.content_type {
         req_builder.header("Content-Type", content_type)
@@ -99,17 +145,9 @@ fn hit_target(
         req_builder
     };
 
-    let mut headers = HeaderMap::with_capacity(base_headers.len());
-    for header in base_headers.iter() {
-        if let Some((name, value)) = header.split_once(':') {
-            let name = HeaderName::from_bytes(name.trim().as_bytes())?;
-            let value = HeaderValue::from_bytes(value.trim().as_bytes())?;
-            headers.append(name, value);
-        }
-    }
     req_builder = req_builder.headers(headers);
 
-    let (bytes_sent, req, receive_start_at) = match &url_entry.body {
+    let (bytes_sent, resp, receive_started_at) = match &url_entry.body {
         BodyData::Content(body) => (
             body.len() as u64,
             req_builder.body(body.clone()).send()?,
@@ -125,17 +163,30 @@ fn hit_target(
         }
         BodyData::None => (0u64, req_builder.send()?, Instant::now()),
     };
-    let status = req.status();
-    let bytes_received = req.bytes()?.len() as u64;
-    let receive_end_at = Instant::now();
+    let status = resp.status();
+    let url = resp.url().to_string();
+    let (response_data, bytes_received) = if url_entry.capture_response {
+        let response_data = from_response(resp)?;
+        let size = response_data.content.size as u64;
+        (Some(response_data), size)
+    } else {
+        (None::<crate::har::Response>, resp.bytes()?.len() as u64)
+    };
+    let receive_ended_at = Instant::now();
 
-    Ok(CallResult {
-        status,
-        bytes_sent,
-        bytes_received,
-        receive_start_at,
-        receive_end_at,
-    })
+    Ok((
+        CallResult {
+            url,
+            status,
+            bytes_sent,
+            bytes_received,
+            timestamp_request_started,
+            request_started_at,
+            receive_started_at,
+            receive_ended_at,
+        },
+        response_data,
+    ))
 }
 
 fn get_error_short(e: Box<dyn Error>) -> String {
@@ -162,6 +213,81 @@ fn get_error_short(e: Box<dyn Error>) -> String {
     }
 }
 
+fn create_thar(
+    url_entry: &UrlEntry,
+    headers: &HeaderMap,
+    call_result: CallResult,
+    response: crate::har::Response,
+) -> Entry {
+    let req_headers: Vec<Record> = headers
+        .iter()
+        .map(|(k, v)| crate::har::Record {
+            name: k.to_string(),
+            value: v.to_str().unwrap_or("[non-utf8]").to_string(),
+        })
+        .collect();
+    let total_time = call_result
+        .receive_ended_at
+        .duration_since(call_result.request_started_at)
+        .as_millis() as i64;
+
+    let post_data = if url_entry.capture_response {
+        let mime_type = (url_entry.content_type)
+            .clone()
+            .unwrap_or("".to_owned())
+            .to_owned();
+        let text = match (url_entry.body).clone() {
+            BodyData::Content(body) => Some(String::from_utf8(body).unwrap_or_default()),
+            BodyData::File(_) => None, // Assumed it will be too big to log
+            BodyData::None => None,
+        };
+        if text.is_some() {
+            let text = text.unwrap();
+            // TODO: if type is application/x-www-form-urlencoded or multipart/form-data then populate params
+            let params = vec![];
+
+            let pd = PostData {
+                mime_type,
+                text,
+                params,
+            };
+            Some(pd)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    Entry::new(
+        call_result.timestamp_request_started,
+        crate::har::Request {
+            method: url_entry.method.to_string(),
+            url: call_result.url,
+            cookies: vec![],
+            headers: req_headers,
+            post_data,
+        },
+        response,
+        total_time,
+    )
+}
+
+fn get_headers(
+    base_headers: &[String],
+    url_entry: &UrlEntry,
+) -> Result<HeaderMap, Box<dyn std::error::Error>> {
+    let mut headers = HeaderMap::with_capacity(base_headers.len());
+    for header in base_headers.iter() {
+        if let Some((name, value)) = header.split_once(':') {
+            let name = HeaderName::from_bytes(name.trim().as_bytes())?;
+            let value = HeaderValue::from_bytes(value.trim().as_bytes())?;
+            headers.append(name, value);
+        }
+    }
+    Ok(headers)
+}
+
 fn traffic_user(
     baseurl: Url,
     base_headers: Vec<String>,
@@ -169,6 +295,7 @@ fn traffic_user(
     rx: Receiver<Option<UrlEntry>>,
     client: Client,
     result_tx: Sender<Sample>,
+    thar_tx: Sender<Entry>,
 ) -> usize {
     let mut count = 0;
     let mut succeess_count = 0;
@@ -188,31 +315,45 @@ fn traffic_user(
         let url_entry = url_entry.unwrap();
         let timestamp = Utc::now();
         let start = Instant::now();
-        let entry = match hit_target(&client, &baseurl, &base_headers, &url_entry) {
-            Result::Ok(v) => {
+        let headers = get_headers(&base_headers, &url_entry).unwrap();
+        let sample = match hit_target(
+            &client,
+            &baseurl,
+            headers.clone(),
+            &url_entry,
+            timestamp,
+            start,
+        ) {
+            Result::Ok((result, response)) => {
                 let elapsed = start.elapsed();
                 total_duration += elapsed;
                 count += 1;
-                total_bytes += v.bytes_received;
-                if v.status.is_success() {
+                total_bytes += result.bytes_received;
+                if result.status.is_success() {
                     succeess_count += 1;
                 }
 
-                Sample {
+                let sample = Sample {
                     completed_at_ms: (timestamp + elapsed).timestamp_millis(),
                     duration_ms: elapsed.as_millis() as u32,
-                    receive_ms: v
-                        .receive_end_at
-                        .duration_since(v.receive_start_at)
+                    receive_ms: result
+                        .receive_ended_at
+                        .duration_since(result.receive_started_at)
                         .as_millis() as u32,
-                    fail: if v.status.is_success() { 0 } else { 1 },
-                    status: v.status.as_str().to_string(),
-                    bytes_up: v.bytes_sent,
-                    bytes_down: v.bytes_received,
+                    fail: if result.status.is_success() { 0 } else { 1 },
+                    status: result.status.as_str().to_string(),
+                    bytes_up: result.bytes_sent,
+                    bytes_down: result.bytes_received,
                     call: format!("{} {}", url_entry.method, url_entry.urlpart),
                     label: "".to_string(),
                     thread: thread_name.to_string(),
+                };
+
+                if let Some(resp) = response {
+                    let thar = create_thar(&url_entry, &headers, result, resp);
+                    thar_tx.send(thar);
                 }
+                sample
             }
             Result::Err(e) => {
                 let kind = get_error_short(e);
@@ -234,7 +375,7 @@ fn traffic_user(
                 }
             }
         };
-        if let Err(e) = result_tx.send(entry) {
+        if let Err(e) = result_tx.send(sample) {
             eprintln!("ERROR: Could not post result: {:?}", e);
         }
     }
@@ -275,6 +416,32 @@ fn logger(results_file: &Path, rx: Receiver<Sample>, stats_tx: Sender<Sample>) {
     }
     csv.flush().unwrap();
     debug!("Logging complete. Received {} entries.", count);
+}
+
+fn thar_logger(thar_file: &Path, rx: Receiver<Entry>) {
+    // Do not open the responses file until there is actually a response to
+    // write (responses do not get written unless asked to be written.)
+    let mut writer: Option<BufWriter<File>> = None;
+
+    let mut count = 0;
+    loop {
+        let thar = rx.recv().unwrap();
+        if thar.time == TERMINATE_THAR_TIME {
+            // Got the signal to quit
+            break;
+        }
+        count += 1;
+        let mut w = writer.get_or_insert_with(|| {
+            let file = File::create(thar_file).expect("Could not open responses file for writing.");
+            BufWriter::new(file)
+        });
+        serde_json::to_writer(&mut w, &thar).expect("Could not serialize response.");
+        w.write(b"\n");
+    }
+    if let Some(mut w) = writer {
+        w.flush().unwrap();
+    }
+    debug!("Response writing complete. Received {} responses.", count);
 }
 
 struct Stats {
@@ -806,6 +973,32 @@ pub fn run_traffic(config: Configuration, urls: Receiver<UrlEntry>) {
         label: "".to_string(),
         thread: "0".to_string(),
     };
+    let terminate_thar = Entry {
+        connection: None,
+        pageref: None,
+        request: Request {
+            cookies: vec![],
+            headers: vec![],
+            method: "".to_string(),
+            post_data: None,
+            url: "".to_string(),
+        },
+        response: crate::har::Response {
+            content: crate::har::Content {
+                compression: None,
+                encoding: None,
+                mime_type: "".to_string(),
+                size: 0,
+                text: None,
+            },
+            cookies: vec![],
+            headers: vec![],
+            status: -1,
+        },
+        server_i_p_address: None,
+        started_date_time: Utc::now(),
+        time: TERMINATE_THAR_TIME,
+    };
 
     let num_threads = if config.threads == 0 {
         std::thread::available_parallelism().map_or(1, |t| t.get())
@@ -832,6 +1025,7 @@ pub fn run_traffic(config: Configuration, urls: Receiver<UrlEntry>) {
     scope(|scope| {
         let (tx, rx) = bounded(1);
         let (result_tx, result_rx) = bounded(1000);
+        let (response_tx, response_rx) = bounded(1000);
         let (stat_liveness_tx, stat_liveness_rx) = bounded(0);
         let (stats_tx, stats_rx) = bounded(1000);
         let (cancel_tx, cancel_rx) = bounded(0);
@@ -867,6 +1061,7 @@ pub fn run_traffic(config: Configuration, urls: Receiver<UrlEntry>) {
             let thread_rx = rx.clone();
             let thread_client = client.clone();
             let thread_result_tx = result_tx.clone();
+            let thread_response_tx = response_tx.clone();
             let thread_baseurl = config.baseurl.clone();
             let thread_base_headers = headers.clone();
             let thread_name = if config.nodes > 1 {
@@ -883,13 +1078,20 @@ pub fn run_traffic(config: Configuration, urls: Receiver<UrlEntry>) {
                     thread_rx,
                     thread_client,
                     thread_result_tx,
+                    thread_response_tx,
                 )
             });
             threads.push(handle);
         }
 
-        // Spin up logger outputter
+        // Spin up logger file writer thread
         let logger_thread = scope.spawn(|| logger(&config.results_file, result_rx, stats_tx));
+
+        // Spin up response logger thread
+        let response_logger_thread =
+            scope.spawn(|| thar_logger(&config.responses_file, response_rx));
+
+        // Listen to manual
         ctrlc::set_handler(move || cancel_tx.send(()).expect("Unable to send cancel signal."))
             .expect("Could not set up Ctrl-C handler.");
 
@@ -977,6 +1179,16 @@ pub fn run_traffic(config: Configuration, urls: Receiver<UrlEntry>) {
             );
         } else if let Err(e) = logger_thread.join() {
             eprintln!("Failed to join logger thread. Error: {:?}", e);
+        }
+
+        // Signal to response logging thread to shutdown
+        if let Err(e) = response_tx.send(terminate_thar) {
+            eprintln!(
+                "Failed to signal the response logger to stop gracefully. Error: {:?}",
+                e
+            );
+        } else if let Err(e) = response_logger_thread.join() {
+            eprintln!("Failed to join response logger thread. Error: {:?}", e);
         }
 
         if log_enabled!(Level::Debug) {
