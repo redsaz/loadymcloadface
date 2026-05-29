@@ -26,7 +26,7 @@ const TERMINATE_THAR_TIME: i64 = -1234;
 fn from_response(resp: Response) -> Result<crate::har::Response, Box<dyn std::error::Error>> {
     let status = resp.status().as_u16() as i32;
     let cookies = vec![];
-    let headers = resp
+    let headers: Vec<Record> = resp
         .headers()
         .iter()
         .map(|(k, v)| crate::har::Record {
@@ -37,11 +37,18 @@ fn from_response(resp: Response) -> Result<crate::har::Response, Box<dyn std::er
                 .to_string(),
         })
         .collect();
+    let mime_type = headers
+        .iter()
+        .find(|rec| "Content-Type".eq_ignore_ascii_case(rec.name.as_str()))
+        .map(|rec| rec.value.clone())
+        .unwrap_or_else(|| "".to_owned());
     let body = resp.bytes()?;
-    /* TODO: body */
+    // For now, we will not decompress the text. But the headers can be used to
+    // find the Content-Encoding header and the decompression can still happen.
+    // TODO: The rest of this: body.utf8_chunks().
     let content = Content {
             compression: /* TODO */ None,
-            mime_type: "TODO".to_owned(),
+            mime_type,
             text: /* TODO */ None,
             encoding: /* TODO */ None,
             size: body.len() as i64,
